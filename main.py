@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8670258284:AAEE74b5XcUnDJUG6DpH8QJkixL8WWj8NCw"
 ADMIN_IDS = [5180190297, 6448523574]
+ADMIN_USERNAMES = ["minhthune2003", "makkllai"]  # Thêm dòng này
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot.db")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -228,7 +229,15 @@ def get_daily_stats() -> Dict:
     new_users = c.fetchone()[0]
     conn.close()
     return {'sales': sales_count or 0, 'revenue': revenue or 0, 'new_users': new_users}
-
+# ==================== THÔNG BÁO USER ====================
+async def notify_user(user_id: int, title: str, message: str, success: bool = True):
+    """Gửi thông báo đến user"""
+    try:
+        icon = "✅" if success else "❌"
+        text = f"{icon} <b>{title}</b>\n\n{message}"
+        await bot.send_message(user_id, text)
+    except Exception as e:
+        logger.error(f"Không thể gửi thông báo cho user {user_id}: {e}")
 # ==================== BOT ====================
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
@@ -248,13 +257,13 @@ class RechargeState(StatesGroup):
     waiting_for_amount = State()
     waiting_for_bill = State()
 
-# ==================== KEYBOARDS ====================
 def main_menu(user_balance: int = 0):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 MUA ACC", callback_data="buy")],
         [InlineKeyboardButton(text="💰 SỐ DƯ", callback_data="balance")],
         [InlineKeyboardButton(text="📜 LỊCH SỬ", callback_data="history")],
-        [InlineKeyboardButton(text="💳 NẠP TIỀN", callback_data="recharge")]
+        [InlineKeyboardButton(text="💳 NẠP TIỀN", callback_data="recharge")],
+        [InlineKeyboardButton(text="🆘 HỖ TRỢ", callback_data="support")]
     ])
 
 def admin_menu():
@@ -402,6 +411,34 @@ async def show_history(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
+# ==================== HỖ TRỢ ====================
+@dp.callback_query(F.data == "support")
+async def support_menu(call: CallbackQuery):
+    # Tạo danh sách nút liên hệ admin
+    buttons = []
+    for username in ADMIN_USERNAMES:
+        buttons.append([InlineKeyboardButton(text=f"📩 @{username}", url=f"https://t.me/{username}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    
+    support_text = f"""
+🆘 <b>HỖ TRỢ KHÁCH HÀNG</b>
+
+📌 <b>Các vấn đề cần hỗ trợ:</b>
+• 🎮 Lỗi đăng nhập account
+• 💳 Nạp tiền chưa nhận được
+• 🔐 Quên mật khẩu rút tiền
+• 📝 Khiếu nại, thắc mắc khác
+
+━━━━━━━━━━━━━━━━━━━━
+
+<b>📞 Liên hệ admin:</b>
+Bấm vào tên admin bên dưới để chat trực tiếp!
+
+⏳ <b>Thời gian phản hồi:</b> 8h - 22h hàng ngày
+
+💡 <b>Lưu ý:</b> Ghi rõ vấn đề và kèm ảnh/video nếu có
+"""
+    await call.message.edit_text(support_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 # ==================== NẠP TIỀN ====================
 @dp.callback_query(F.data == "recharge")
 async def recharge_menu(call: CallbackQuery, state: FSMContext):
@@ -432,34 +469,55 @@ async def process_recharge_amount(msg: Message, state: FSMContext):
         
         import random
         import string
+        import urllib.parse
+        
         trans_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         await state.update_data(trans_code=trans_code)
         
-        bank_text = f"""
-💳 <b>HƯỚNG DẪN NẠP TIỀN</b>
+        # Thông tin ngân hàng chính chủ
+        BANK_ACC = "666666291005"
+        BANK_NAME = "MBBank"
+        BANK_OWNER = "NGUYEN THE LAM"
+        
+        # Tạo nội dung chuyển khoản
+        content = f"NAP {trans_code} {msg.from_user.id}"
+        encoded_content = urllib.parse.quote(content)
+        
+        # Tạo URL QR code từ SePay
+        qr_url = f"https://qr.sepay.vn/img?acc={BANK_ACC}&bank={BANK_NAME}&amount={amount}&des={encoded_content}"
+        
+        # Nội dung tin nhắn kèm QR
+        caption = f"""
+💳 <b>QUÉT QR ĐỂ NẠP TIỀN</b>
 
-🏦 <b>Ngân hàng:</b> MB Bank (MBBank)
-<b>Số tài khoản:</b> <code>123456789</code>
-<b>Chủ tài khoản:</b> SHOP ACC VIP
-<b>Nội dung:</b> <code>NAP {trans_code} {msg.from_user.id}</code>
+🏦 <b>Ngân hàng:</b> {BANK_NAME}
+<b>Số tài khoản:</b> <code>{BANK_ACC}</code>
+<b>Chủ tài khoản:</b> {BANK_OWNER}
 
 💰 <b>Số tiền:</b> {amount:,}đ
+🔑 <b>Mã GD:</b> <code>{trans_code}</code>
 
 ━━━━━━━━━━━━━━━━━━━━
 
-📌 <b>Lưu ý:</b>
-• Chuyển đúng số tiền và nội dung
-• Sau khi chuyển, gửi ảnh bill vào đây
-• Admin sẽ xác nhận và cộng tiền
+📌 <b>Hướng dẫn:</b>
+1. Quét mã QR bên dưới
+2. Kiểm tra lại số tiền và nội dung
+3. Xác nhận chuyển khoản
+
+⚠️ Nội dung chuyển khoản: <code>{content}</code>
+✅ Sau khi chuyển, tiền sẽ tự động cộng vào tài khoản
 
 Gửi /cancel để hủy
 """
-        await msg.answer(bank_text)
-        await msg.answer("📸 <b>Vui lòng chụp màn hình giao dịch và gửi ảnh vào đây!</b>")
-        await state.set_state(RechargeState.waiting_for_bill)
+        
+        # Gửi ảnh QR kèm hướng dẫn
+        await msg.answer_photo(photo=qr_url, caption=caption)
+        await state.clear()
         
     except ValueError:
         await msg.answer("❌ Vui lòng nhập số tiền hợp lệ!")
+    except Exception as e:
+        await msg.answer(f"❌ Lỗi tạo QR: {str(e)}\nVui lòng thử lại sau!")
 
 @dp.message(RechargeState.waiting_for_bill)
 async def process_recharge_bill(msg: Message, state: FSMContext):
@@ -771,15 +829,37 @@ async def process_money(msg: Message, state: FSMContext):
         if action == "sub":
             amount = -amount
         
+        old_balance = user[3] if user and isinstance(user[3], int) else 0
         update_balance(user_id, amount, f"Admin {'cộng' if amount > 0 else 'trừ'} {abs(amount)}đ")
         add_admin_log(msg.from_user.id, f"{'add' if amount > 0 else 'sub'}_money", user_id, f"{abs(amount)}đ")
         new_user = get_user(user_id)
         new_balance = new_user[3] if new_user and isinstance(new_user[3], int) else 0
         
+        # Thông báo cho admin
         await msg.answer(
             f"✅ Đã {'cộng' if amount > 0 else 'trừ'} {abs(amount):,}đ cho user {user_id}\n"
             f"💰 Số dư mới: {new_balance:,}đ"
         )
+        
+        # Thông báo cho user
+        if amount > 0:
+            await notify_user(
+                user_id,
+                "NẠP TIỀN THÀNH CÔNG",
+                f"💵 Số tiền: {amount:,}đ\n"
+                f"💰 Số dư hiện tại: {new_balance:,}đ\n\n"
+                f"Cảm ơn bạn đã nạp tiền! 🎉"
+            )
+        else:
+            await notify_user(
+                user_id,
+                "TRỪ TIỀN TÀI KHOẢN",
+                f"💸 Số tiền: {abs(amount):,}đ\n"
+                f"💰 Số dư hiện tại: {new_balance:,}đ\n\n"
+                f"📌 Lý do: {msg.text}",
+                success=True
+            )
+        
         await state.clear()
         await msg.answer("👑 ADMIN PANEL", reply_markup=admin_menu())
         
@@ -871,6 +951,7 @@ async def admin_add_money_cmd(msg: Message):
             await msg.answer(f"❌ Không tìm thấy user ID: {user_id}")
             return
         
+        old_balance = user[3] if user and isinstance(user[3], int) else 0
         update_balance(user_id, amount, f"Admin {msg.from_user.id} cộng {amount}đ")
         add_admin_log(msg.from_user.id, "add_money", user_id, f"{amount}đ")
         
@@ -883,17 +964,14 @@ async def admin_add_money_cmd(msg: Message):
         )
         
         # Thông báo cho user
-        try:
-            await bot.send_message(
-                user_id,
-                f"✅ <b>NẠP TIỀN THÀNH CÔNG!</b>\n\n"
-                f"💰 Số tiền: {amount:,}đ\n"
-                f"💵 Số dư hiện tại: {new_balance:,}đ\n\n"
-                f"Cảm ơn bạn đã nạp tiền! 🎉"
-            )
-        except:
-            pass
-            
+        await notify_user(
+            user_id,
+            "NẠP TIỀN THÀNH CÔNG",
+            f"💵 Số tiền: {amount:,}đ\n"
+            f"💰 Số dư hiện tại: {new_balance:,}đ\n\n"
+            f"Cảm ơn bạn đã nạp tiền! 🎉"
+        )
+        
     except Exception as e:
         await msg.answer(f"❌ Lỗi: {str(e)}\nDùng: <code>/addmoney user_id số_tiền</code>")
 
