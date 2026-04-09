@@ -590,7 +590,10 @@ async def back_menu(call: CallbackQuery):
 
 # ==================== ADMIN ====================
 @dp.message(Command("admin"))
-async def admin_panel(msg: Message):
+async def admin_panel(msg: Message, state: FSMContext):
+    # Clear state để tránh lỗi
+    await state.clear()
+    
     if msg.from_user.id not in ADMIN_IDS:
         await msg.answer("⛔ Không có quyền!")
         return
