@@ -40,12 +40,12 @@ def init_db():
     c = conn.cursor()
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
-        telegram_id INTEGER PRIMARY KEY,
+        telegram_id BIGINT PRIMARY KEY,
         username TEXT,
         full_name TEXT,
-        balance INTEGER DEFAULT 0,
-        total_recharge INTEGER DEFAULT 0,
-        total_spent INTEGER DEFAULT 0,
+        balance BIGINT DEFAULT 0,
+        total_recharge BIGINT DEFAULT 0,
+        total_spent BIGINT DEFAULT 0,
         created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS accounts (
@@ -58,16 +58,16 @@ def init_db():
     
     c.execute('''CREATE TABLE IF NOT EXISTS purchases (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER, account_id INTEGER, site TEXT, amount INTEGER, 
+        user_id BIGINT, account_id INTEGER, site TEXT, amount INTEGER, 
         purchased_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS recharge_history (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER, amount INTEGER, note TEXT, created_at TEXT)''')
+        user_id BIGINT, amount INTEGER, note TEXT, created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS admin_logs (
         id SERIAL PRIMARY KEY,
-        admin_id INTEGER, action TEXT, target_id INTEGER, details TEXT, created_at TEXT)''')
+        admin_id BIGINT, action TEXT, target_id BIGINT, details TEXT, created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS site_settings (
         site TEXT PRIMARY KEY, price INTEGER, is_active INTEGER DEFAULT 1)''')
@@ -79,7 +79,7 @@ def init_db():
     conn.close()
     logger.info("✅ Database on VPS initialized")
 
-def get_user(telegram_id: int):
+def get_user(telegram_id: int):  # Giữ nguyên, chỉ đổi trong database
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
