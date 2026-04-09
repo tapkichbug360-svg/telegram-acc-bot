@@ -31,6 +31,13 @@ def update_balance(telegram_id: int, amount: int, trans_id: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
+    # Thêm cột trans_id nếu chưa có
+    try:
+        c.execute("ALTER TABLE recharge_history ADD COLUMN trans_id TEXT")
+        conn.commit()
+    except:
+        pass  # Cột đã tồn tại
+    
     # Kiểm tra trùng lặp
     c.execute("SELECT id FROM recharge_history WHERE trans_id = ?", (trans_id,))
     if c.fetchone():
