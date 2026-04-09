@@ -115,4 +115,4 @@ def root():
 
 @app.on_event("shutdown")
 async def shutdown():
-    await bot.session.close()
+    await bot.session.close()# force redeploy
