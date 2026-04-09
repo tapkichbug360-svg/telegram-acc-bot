@@ -18,7 +18,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
 # ==================== CẤU HÌNH ====================
-BOT_TOKEN = "8670258284:AAEE74b5XcUnDJUG6DpH8QJkixL8WWj8NCw"
+BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
 ADMIN_IDS = [5180190297, 6448523574]
 ADMIN_USERNAMES = ["minhthune2003", "makkllai"]  # Thêm dòng này
 

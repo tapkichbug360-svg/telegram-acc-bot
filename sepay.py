@@ -12,7 +12,7 @@ app = FastAPI()
 
 # Xóa DB_PATH, thay bằng DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8670258284:AAEE74b5XcUnDJUG6DpH8QJkixL8WWj8NCw")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI")
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
