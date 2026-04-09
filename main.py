@@ -1,11 +1,12 @@
 ﻿import asyncio
-import sqlite3
 import os
+import psycopg2
 import logging
 import threading
 import uvicorn
 from sepay import app as sepay_app
 from datetime import datetime
+from psycopg2.extras import RealDictCursor
 from typing import Dict, List, Tuple
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
@@ -21,8 +22,7 @@ BOT_TOKEN = "8670258284:AAEE74b5XcUnDJUG6DpH8QJkixL8WWj8NCw"
 ADMIN_IDS = [5180190297, 6448523574]
 ADMIN_USERNAMES = ["minhthune2003", "makkllai"]  # Thêm dòng này
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot.db")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
 
 SITES = ["SC88", "C168", "CM88", "FLY88", "F168"]
 SITE_EMOJI = {"SC88": "🎰", "C168": "🎲", "CM88": "🃏", "FLY88": "✈️", "F168": "🏆"}
@@ -32,8 +32,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # ==================== DATABASE ====================
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     
     c.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -46,7 +49,7 @@ def init_db():
         created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         site TEXT, username TEXT, password TEXT, 
         withdraw_password TEXT, real_name TEXT, bank_number TEXT, phone TEXT,
         price INTEGER DEFAULT 20000,
@@ -54,83 +57,83 @@ def init_db():
         note TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS purchases (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         user_id INTEGER, account_id INTEGER, site TEXT, amount INTEGER, 
         purchased_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS recharge_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         user_id INTEGER, amount INTEGER, note TEXT, created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS admin_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         admin_id INTEGER, action TEXT, target_id INTEGER, details TEXT, created_at TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS site_settings (
         site TEXT PRIMARY KEY, price INTEGER, is_active INTEGER DEFAULT 1)''')
     
     for site in SITES:
-        c.execute("INSERT OR IGNORE INTO site_settings (site, price) VALUES (?, ?)", (site, SITE_PRICE[site]))
+        c.execute("INSERT INTO site_settings (site, price) VALUES (%s, %s) ON CONFLICT (site) DO NOTHING", (site, SITE_PRICE[site]))
     
     conn.commit()
     conn.close()
-    logger.info("✅ Database initialized")
+    logger.info("✅ Database on VPS initialized")
 
 def get_user(telegram_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+    c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
     user = c.fetchone()
     if not user:
-        c.execute("INSERT INTO users (telegram_id, created_at) VALUES (?, ?)", 
+        c.execute("INSERT INTO users (telegram_id, created_at) VALUES (%s, %s)", 
                   (telegram_id, datetime.now().isoformat()))
         conn.commit()
-        c.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
         user = c.fetchone()
     conn.close()
     return user
 
 def update_balance(telegram_id: int, amount: int, note: str = ""):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, telegram_id))
+    c.execute("UPDATE users SET balance = balance + %s WHERE telegram_id = %s", (amount, telegram_id))
     if amount > 0:
-        c.execute("UPDATE users SET total_recharge = total_recharge + ? WHERE telegram_id = ?", (amount, telegram_id))
+        c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
     else:
-        c.execute("UPDATE users SET total_spent = total_spent + ? WHERE telegram_id = ?", (-amount, telegram_id))
-    c.execute("INSERT INTO recharge_history (user_id, amount, note, created_at) VALUES (?, ?, ?, ?)",
+        c.execute("UPDATE users SET total_spent = total_spent + %s WHERE telegram_id = %s", (-amount, telegram_id))
+    c.execute("INSERT INTO recharge_history (user_id, amount, note, created_at) VALUES (%s, %s, %s, %s)",
               (telegram_id, amount, note, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
 def add_admin_log(admin_id: int, action: str, target_id: int = None, details: str = ""):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO admin_logs (admin_id, action, target_id, details, created_at) VALUES (?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO admin_logs (admin_id, action, target_id, details, created_at) VALUES (%s, %s, %s, %s, %s)",
               (admin_id, action, target_id, details, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
 def get_available_account(site: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM accounts WHERE site = ? AND is_sold = 0 LIMIT 1", (site,))
+    c.execute("SELECT * FROM accounts WHERE site = %s AND is_sold = 0 LIMIT 1", (site,))
     acc = c.fetchone()
     conn.close()
     return acc
 
 def mark_sold(account_id: int, user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE accounts SET is_sold = 1, sold_to = ?, sold_at = ? WHERE id = ?",
+    c.execute("UPDATE accounts SET is_sold = 1, sold_to = %s, sold_at = %s WHERE id = %s",
               (user_id, datetime.now().isoformat(), account_id))
     conn.commit()
     conn.close()
 
 def save_purchase(user_id: int, account_id: int, site: str, amount: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO purchases (user_id, account_id, site, amount, purchased_at) VALUES (?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO purchases (user_id, account_id, site, amount, purchased_at) VALUES (%s, %s, %s, %s, %s)",
               (user_id, account_id, site, amount, datetime.now().isoformat()))
     conn.commit()
     conn.close()
@@ -138,41 +141,41 @@ def save_purchase(user_id: int, account_id: int, site: str, amount: int):
 def add_account(site: str, username: str, password: str, 
                 withdraw_password: str = "", real_name: str = "", 
                 bank_number: str = "", phone: str = "", note: str = ""):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("""INSERT INTO accounts 
               (site, username, password, withdraw_password, real_name, bank_number, phone, created_at, note) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
               (site, username, password, withdraw_password, real_name, bank_number, phone, datetime.now().isoformat(), note))
     conn.commit()
     conn.close()
 
 def bulk_add_accounts(site: str, accounts: List[Tuple[str, str]]):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     for username, password in accounts:
-        c.execute("INSERT INTO accounts (site, username, password, created_at) VALUES (?, ?, ?, ?)",
+        c.execute("INSERT INTO accounts (site, username, password, created_at) VALUES (%s, %s, %s, %s)",
                   (site, username, password, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
 def get_inventory() -> Dict:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     inv = {}
     for site in SITES:
-        c.execute("SELECT COUNT(*) FROM accounts WHERE site = ? AND is_sold = 0", (site,))
+        c.execute("SELECT COUNT(*) FROM accounts WHERE site = %s AND is_sold = 0", (site,))
         inv[site] = c.fetchone()[0]
     conn.close()
     return inv
 
 def get_sold_stats() -> Tuple[Dict, Dict]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     sold = {}
     revenue = {}
     for site in SITES:
-        c.execute("SELECT COUNT(*), SUM(amount) FROM purchases WHERE site = ?", (site,))
+        c.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM purchases WHERE site = %s", (site,))
         count, total = c.fetchone()
         sold[site] = count or 0
         revenue[site] = total or 0
@@ -180,13 +183,13 @@ def get_sold_stats() -> Tuple[Dict, Dict]:
     return sold, revenue
 
 def get_user_history(user_id: int, limit: int = 20) -> List[Dict]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM purchases WHERE user_id = ? ORDER BY purchased_at DESC LIMIT ?", (user_id, limit))
+    c.execute("SELECT * FROM purchases WHERE user_id = %s ORDER BY purchased_at DESC LIMIT %s", (user_id, limit))
     purchases = c.fetchall()
     history = []
     for p in purchases:
-        c.execute("SELECT username, password, withdraw_password, real_name, bank_number, phone FROM accounts WHERE id = ?", (p[2],))
+        c.execute("SELECT username, password, withdraw_password, real_name, bank_number, phone FROM accounts WHERE id = %s", (p[2],))
         acc = c.fetchone()
         if acc:
             history.append({
@@ -204,15 +207,15 @@ def get_user_history(user_id: int, limit: int = 20) -> List[Dict]:
     return history
 
 def get_all_users(limit: int = 50) -> List[Tuple]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT telegram_id, username, full_name, balance, total_recharge, total_spent, created_at FROM users ORDER BY balance DESC LIMIT ?", (limit,))
+    c.execute("SELECT telegram_id, username, full_name, balance, total_recharge, total_spent, created_at FROM users ORDER BY balance DESC LIMIT %s", (limit,))
     users = c.fetchall()
     conn.close()
     return users
 
 def get_user_count() -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     count = c.fetchone()[0]
@@ -220,12 +223,12 @@ def get_user_count() -> int:
     return count
 
 def get_daily_stats() -> Dict:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     today = datetime.now().date().isoformat()
-    c.execute("SELECT COUNT(*), SUM(amount) FROM purchases WHERE DATE(purchased_at) = ?", (today,))
+    c.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM purchases WHERE DATE(purchased_at) = %s", (today,))
     sales_count, revenue = c.fetchone()
-    c.execute("SELECT COUNT(*) FROM users WHERE DATE(created_at) = ?", (today,))
+    c.execute("SELECT COUNT(*) FROM users WHERE DATE(created_at) = %s", (today,))
     new_users = c.fetchone()[0]
     conn.close()
     return {'sales': sales_count or 0, 'revenue': revenue or 0, 'new_users': new_users}
@@ -728,12 +731,12 @@ async def admin_save_acc(msg: Message, state: FSMContext):
                 accounts.append((username, password, withdraw_password, real_name, bank_number, phone))
         if accounts:
             # Thêm từng account với đầy đủ thông tin
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             c = conn.cursor()
             for acc in accounts:
                 c.execute("""INSERT INTO accounts 
                           (site, username, password, withdraw_password, real_name, bank_number, phone, created_at) 
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                          VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                           (site, acc[0], acc[1], acc[2], acc[3], acc[4], acc[5], datetime.now().isoformat()))
             conn.commit()
             conn.close()
@@ -751,11 +754,11 @@ async def admin_save_acc(msg: Message, state: FSMContext):
                 bank_number = parts[4].strip() if len(parts) > 4 else ""
                 phone = parts[5].strip() if len(parts) > 5 else ""
                 
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_db_connection()
                 c = conn.cursor()
                 c.execute("""INSERT INTO accounts 
                           (site, username, password, withdraw_password, real_name, bank_number, phone, created_at) 
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                          VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                           (site, username, password, withdraw_password, real_name, bank_number, phone, datetime.now().isoformat()))
                 conn.commit()
                 conn.close()
@@ -922,9 +925,9 @@ async def admin_save_price(msg: Message, state: FSMContext):
         data = await state.get_data()
         site = data.get('site')
         
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("UPDATE site_settings SET price = ? WHERE site = ?", (price, site))
+        c.execute("UPDATE site_settings SET price = %s WHERE site = %s", (price, site))
         conn.commit()
         conn.close()
         

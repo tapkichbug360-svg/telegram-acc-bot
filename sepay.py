@@ -1,7 +1,7 @@
 import json
-import sqlite3
 import os
 import traceback
+import psycopg2
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from aiogram import Bot
@@ -10,9 +10,12 @@ from aiogram.enums import ParseMode
 
 app = FastAPI()
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot.db")
+# Xóa DB_PATH, thay bằng DATABASE_URL
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8670258284:AAEE74b5XcUnDJUG6DpH8QJkixL8WWj8NCw")
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
 
 async def send_notification(telegram_id: int, amount: int, new_balance: int):
     try:
@@ -28,10 +31,10 @@ Cảm ơn bạn đã nạp tiền! 🎉"""
         print(f"❌ Lỗi gửi thông báo: {e}")
 
 def update_balance(telegram_id: int, amount: int, trans_id: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     
-    # Thêm cột trans_id nếu chưa có
+    # Thêm cột trans_id nếu chưa có (PostgreSQL)
     try:
         c.execute("ALTER TABLE recharge_history ADD COLUMN trans_id TEXT")
         conn.commit()
@@ -39,24 +42,24 @@ def update_balance(telegram_id: int, amount: int, trans_id: str):
         pass  # Cột đã tồn tại
     
     # Kiểm tra trùng lặp
-    c.execute("SELECT id FROM recharge_history WHERE trans_id = ?", (trans_id,))
+    c.execute("SELECT id FROM recharge_history WHERE trans_id = %s", (trans_id,))
     if c.fetchone():
         conn.close()
         return False, 0
     
     # Lấy số dư cũ
-    c.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,))
+    c.execute("SELECT balance FROM users WHERE telegram_id = %s", (telegram_id,))
     old_balance_row = c.fetchone()
     old_balance = old_balance_row[0] if old_balance_row else 0
     
     # Cộng tiền
-    c.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, telegram_id))
-    c.execute("UPDATE users SET total_recharge = total_recharge + ? WHERE telegram_id = ?", (amount, telegram_id))
-    c.execute("INSERT INTO recharge_history (user_id, amount, trans_id, created_at) VALUES (?, ?, ?, ?)",
+    c.execute("UPDATE users SET balance = balance + %s WHERE telegram_id = %s", (amount, telegram_id))
+    c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
+    c.execute("INSERT INTO recharge_history (user_id, amount, trans_id, created_at) VALUES (%s, %s, %s, %s)",
               (telegram_id, amount, trans_id, datetime.now().isoformat()))
     
     # Lấy số dư mới
-    c.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,))
+    c.execute("SELECT balance FROM users WHERE telegram_id = %s", (telegram_id,))
     new_balance_row = c.fetchone()
     new_balance = new_balance_row[0] if new_balance_row else old_balance + amount
     
