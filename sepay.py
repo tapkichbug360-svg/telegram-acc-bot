@@ -70,10 +70,19 @@ async def sepay_webhook(request: Request):
         
         print(f"💰 Amount: {amount}, Content: {content}, TransID: {trans_id}")
         
-        # Parse nội dung: "NAP 5180190297"
+        # Parse nội dung: Hỗ trợ cả 2 format
+        # Format 1: "NAP 5180190297"
+        # Format 2: "NAP TEST 5180190297"
         parts = content.split()
         if len(parts) >= 2 and parts[0].upper() == "NAP":
-            telegram_id = int(parts[1])
+            # Tìm user ID (phần tử cuối cùng hoặc phần tử thứ 2)
+            try:
+                # Thử lấy phần tử cuối cùng (cho cả 2 format)
+                telegram_id = int(parts[-1])
+            except ValueError:
+                # Nếu không được, thử lấy phần tử thứ 2
+                telegram_id = int(parts[1])
+            
             print(f"👤 User ID: {telegram_id}")
             
             success, new_balance = update_balance(telegram_id, amount, trans_id)
