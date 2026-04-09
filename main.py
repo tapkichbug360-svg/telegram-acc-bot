@@ -595,7 +595,10 @@ async def back_menu(call: CallbackQuery):
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message, state: FSMContext):
     # Clear state để tránh lỗi
-    await state.clear()
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+        await msg.answer("🔄 Đã hủy thao tác trước đó!")
     
     if msg.from_user.id not in ADMIN_IDS:
         await msg.answer("⛔ Không có quyền!")
