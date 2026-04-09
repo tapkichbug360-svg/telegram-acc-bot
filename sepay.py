@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import os
+import traceback
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from aiogram import Bot
@@ -10,13 +11,10 @@ from aiogram.enums import ParseMode
 app = FastAPI()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "bot.db")
-
-# Lấy token từ biến môi trường
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8670258284:AAEE74b5XcUnDJUG6DpH8QJkixL8WWj8NCw")
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
 async def send_notification(telegram_id: int, amount: int, new_balance: int):
-    """Gửi thông báo Telegram cho user"""
     try:
         text = f"""✅ <b>NẠP TIỀN THÀNH CÔNG!</b>
 
@@ -25,8 +23,9 @@ async def send_notification(telegram_id: int, amount: int, new_balance: int):
 
 Cảm ơn bạn đã nạp tiền! 🎉"""
         await bot.send_message(telegram_id, text)
+        print(f"✅ Đã gửi thông báo cho user {telegram_id}")
     except Exception as e:
-        print(f"Không thể gửi thông báo cho user {telegram_id}: {e}")
+        print(f"❌ Lỗi gửi thông báo: {e}")
 
 def update_balance(telegram_id: int, amount: int, trans_id: str):
     conn = sqlite3.connect(DB_PATH)
@@ -61,28 +60,38 @@ def update_balance(telegram_id: int, amount: int, trans_id: str):
 @app.post("/webhook/sepay")
 async def sepay_webhook(request: Request):
     try:
+        print("📥 Nhận được webhook từ SePay")
         data = await request.json()
+        print(f"📦 Data: {data}")
+        
         amount = data.get("amount", 0)
         content = data.get("content", "")
         trans_id = data.get("transaction_id", "")
+        
+        print(f"💰 Amount: {amount}, Content: {content}, TransID: {trans_id}")
         
         # Parse nội dung: "NAP 5180190297"
         parts = content.split()
         if len(parts) >= 2 and parts[0].upper() == "NAP":
             telegram_id = int(parts[1])
+            print(f"👤 User ID: {telegram_id}")
             
             success, new_balance = update_balance(telegram_id, amount, trans_id)
             
             if success:
-                # Gửi thông báo Telegram cho user
+                print(f"✅ Cộng tiền thành công! Số dư mới: {new_balance}")
                 await send_notification(telegram_id, amount, new_balance)
                 return {"status": "success", "message": f"Added {amount} to user {telegram_id}"}
             else:
+                print("⚠️ Giao dịch đã được xử lý trước đó")
                 return {"status": "duplicate", "message": "Transaction already processed"}
         
+        print("⚠️ Nội dung không đúng format")
         return {"status": "ignored", "message": "Invalid content format"}
         
     except Exception as e:
+        print(f"❌ LỖI: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
@@ -91,5 +100,4 @@ def root():
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Đóng session bot khi server tắt"""
     await bot.session.close()
