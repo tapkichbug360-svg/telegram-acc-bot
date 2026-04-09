@@ -246,6 +246,7 @@ class PriceState(StatesGroup):
     waiting_for_price = State()
 class RechargeState(StatesGroup):
     waiting_for_amount = State()
+    waiting_for_bill = State()
 
 # ==================== KEYBOARDS ====================
 def main_menu(user_balance: int = 0):
