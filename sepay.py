@@ -71,39 +71,38 @@ async def sepay_webhook(request: Request):
         data = await request.json()
         print(f"📦 Data: {data}")
         
-        amount = data.get("amount", 0)
+        # Lấy đúng amount từ data
+        amount = data.get("transferAmount", 0)  # Sửa: dùng transferAmount
         content = data.get("content", "")
-        trans_id = data.get("transaction_id", "")
+        trans_id = str(data.get("id", ""))  # Sửa: dùng id làm trans_id
         
         print(f"💰 Amount: {amount}, Content: {content}, TransID: {trans_id}")
         
-        # Parse nội dung: Hỗ trợ cả 2 format
-        # Format 1: "NAP 5180190297"
-        # Format 2: "NAP TEST 5180190297"
+        # Parse nội dung: "NAP TAGDMD5E 5180190297 ..."
         parts = content.split()
-        if len(parts) >= 2 and parts[0].upper() == "NAP":
-            # Tìm user ID (phần tử cuối cùng hoặc phần tử thứ 2)
-            try:
-                # Thử lấy phần tử cuối cùng (cho cả 2 format)
-                telegram_id = int(parts[-1])
-            except ValueError:
-                # Nếu không được, thử lấy phần tử thứ 2
-                telegram_id = int(parts[1])
-            
-            print(f"👤 User ID: {telegram_id}")
-            
-            success, new_balance = update_balance(telegram_id, amount, trans_id)
-            
-            if success:
-                print(f"✅ Cộng tiền thành công! Số dư mới: {new_balance}")
-                await send_notification(telegram_id, amount, new_balance)
-                return {"status": "success", "message": f"Added {amount} to user {telegram_id}"}
-            else:
-                print("⚠️ Giao dịch đã được xử lý trước đó")
-                return {"status": "duplicate", "message": "Transaction already processed"}
+        telegram_id = None
         
-        print("⚠️ Nội dung không đúng format")
-        return {"status": "ignored", "message": "Invalid content format"}
+        # Tìm user ID trong nội dung (số có 10 chữ số)
+        for part in parts:
+            if part.isdigit() and len(part) >= 9:
+                telegram_id = int(part)
+                break
+        
+        if telegram_id is None:
+            print("⚠️ Không tìm thấy user ID trong nội dung")
+            return {"status": "ignored", "message": "No user ID found"}
+        
+        print(f"👤 User ID: {telegram_id}")
+        
+        success, new_balance = update_balance(telegram_id, amount, trans_id)
+        
+        if success:
+            print(f"✅ Cộng tiền thành công! Số dư mới: {new_balance}")
+            await send_notification(telegram_id, amount, new_balance)
+            return {"status": "success", "message": f"Added {amount} to user {telegram_id}"}
+        else:
+            print("⚠️ Giao dịch đã được xử lý trước đó")
+            return {"status": "duplicate", "message": "Transaction already processed"}
         
     except Exception as e:
         print(f"❌ LỖI: {str(e)}")
