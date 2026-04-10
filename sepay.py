@@ -11,9 +11,10 @@ from aiogram.enums import ParseMode
 app = FastAPI()
 
 # Xóa DB_PATH, thay bằng DATABASE_URL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@localhost:5432/telegram_bot")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI")
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -30,16 +31,23 @@ Cảm ơn bạn đã nạp tiền! 🎉"""
     except Exception as e:
         print(f"❌ Lỗi gửi thông báo: {e}")
 
-def update_balance(telegram_id: int, amount: int, trans_id: str):
+def update_balance(telegram_id: int, amount: int, trans_id: str, content: str = ""):
     conn = get_db_connection()
     c = conn.cursor()
     
     # Thêm cột trans_id nếu chưa có (PostgreSQL)
     try:
-        c.execute("ALTER TABLE recharge_history ADD COLUMN trans_id TEXT")
+        c.execute("ALTER TABLE recharge_history ADD COLUMN IF NOT EXISTS trans_id TEXT")
         conn.commit()
     except:
-        pass  # Cột đã tồn tại
+        pass
+    
+    # Thêm cột note nếu chưa có
+    try:
+        c.execute("ALTER TABLE recharge_history ADD COLUMN IF NOT EXISTS note TEXT")
+        conn.commit()
+    except:
+        pass
     
     # Kiểm tra trùng lặp
     c.execute("SELECT id FROM recharge_history WHERE trans_id = %s", (trans_id,))
@@ -55,8 +63,8 @@ def update_balance(telegram_id: int, amount: int, trans_id: str):
     # Cộng tiền
     c.execute("UPDATE users SET balance = balance + %s WHERE telegram_id = %s", (amount, telegram_id))
     c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
-    c.execute("INSERT INTO recharge_history (user_id, amount, trans_id, created_at) VALUES (%s, %s, %s, %s)",
-              (telegram_id, amount, trans_id, datetime.now().isoformat()))
+    c.execute("INSERT INTO recharge_history (user_id, amount, trans_id, note, created_at) VALUES (%s, %s, %s, %s, %s)",
+              (telegram_id, amount, trans_id, content, datetime.now().isoformat()))
     
     # Lấy số dư mới
     c.execute("SELECT balance FROM users WHERE telegram_id = %s", (telegram_id,))
@@ -97,7 +105,7 @@ async def sepay_webhook(request: Request):
         
         print(f"👤 User ID: {telegram_id}")
         
-        success, new_balance = update_balance(telegram_id, amount, trans_id)
+        success, new_balance = update_balance(telegram_id, amount, trans_id, content)
         
         if success:
             print(f"✅ Cộng tiền thành công! Số dư mới: {new_balance}")
@@ -118,4 +126,4 @@ def root():
 
 @app.on_event("shutdown")
 async def shutdown():
-    await bot.session.close()# force redeploy
+    await bot.session.close()

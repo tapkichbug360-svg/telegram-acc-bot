@@ -988,7 +988,99 @@ async def admin_add_money_cmd(msg: Message):
 async def cancel(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer("❌ Đã hủy thao tác!")
+# ==================== KIỂM TRA GIAO DỊCH ====================
+@dp.message(Command("recent"))
+async def recent_transactions(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT trans_id, user_id, amount, note, created_at FROM recharge_history ORDER BY id DESC LIMIT 10")
+    results = c.fetchall()
+    
+    if not results:
+        await msg.answer("📭 Chưa có giao dịch nào!")
+        return
+    
+    text = "📊 **10 GIAO DỊCH GẦN ĐÂY**\n\n"
+    for r in results:
+        time_str = r[4].replace('T', ' ')[:19] if r[4] else 'Không rõ'
+        text += f"🔑 Mã: `{r[0] or 'N/A'}`\n👤 User: `{r[1]}`\n💰 {r[2]:,}đ\n📝 Mã nạp: {r[3] or 'Không'}\n📅 {time_str}\n━━━━━━━━━━━━━━━\n"
+    
+    await msg.answer(text)
+    conn.close()
+@dp.message(Command("userinfo"))
+async def user_info(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    
+    parts = msg.text.split()
+    if len(parts) < 2:
+        await msg.answer("❌ Sai format!\nDùng: /userinfo user_id\nVí dụ: /userinfo 5180190297")
+        return
+    
+    user_id = int(parts[1])
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Lấy thông tin user
+    c.execute("SELECT telegram_id, username, full_name, balance, total_recharge, total_spent, created_at FROM users WHERE telegram_id = %s", (user_id,))
+    user = c.fetchone()
+    
+    if not user:
+        await msg.answer(f"❌ Không tìm thấy user ID: {user_id}")
+        conn.close()
+        return
+    
+    # Lấy 5 giao dịch nạp gần nhất
+    c.execute("SELECT trans_id, amount, note, created_at FROM recharge_history WHERE user_id = %s ORDER BY id DESC LIMIT 5", (user_id,))
+    recharges = c.fetchall()
+    
+    # Lấy 5 lần mua gần nhất
+    c.execute("SELECT site, amount, purchased_at FROM purchases WHERE user_id = %s ORDER BY id DESC LIMIT 5", (user_id,))
+    purchases = c.fetchall()
+    
+    # Format thời gian
+    created_time = user[6].replace('T', ' ')[:19] if user[6] else 'Không rõ'
+    
+    text = f"""👤 <b>THÔNG TIN USER</b>
 
+🆔 <b>ID:</b> <code>{user[0]}</code>
+📝 <b>Tên:</b> {user[2] or user[1] or 'Chưa có'}
+💬 <b>Username:</b> @{user[1] or 'chưa có'}
+
+💰 <b>Số dư:</b> {user[3]:,}đ
+📥 <b>Tổng nạp:</b> {user[4]:,}đ
+📤 <b>Tổng chi:</b> {user[5]:,}đ
+📅 <b>Tham gia:</b> {created_time}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>5 LẦN NẠP GẦN NHẤT:</b>
+"""
+    
+    if recharges:
+        for r in recharges:
+            amount = r[1]
+            note = r[2] or 'Không có mã'
+            time_str = r[3].replace('T', ' ')[:19] if r[3] else 'Không rõ'
+            text += f"\n💰 {amount:+,}đ | {note} | {time_str}"
+    else:
+        text += "\n📭 Chưa có lịch sử nạp"
+    
+    text += "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n🎮 <b>5 LẦN MUA GẦN NHẤT:</b>"
+    
+    if purchases:
+        for p in purchases:
+            time_str = p[2].replace('T', ' ')[:19] if p[2] else 'Không rõ'
+            text += f"\n🎮 {p[0]} | 💰 {p[1]:,}đ | 📅 {time_str}"
+    else:
+        text += "\n📭 Chưa có lịch sử mua"
+    
+    await msg.answer(text)
+    conn.close()
 # ==================== CHẠY WEBHOOK ====================
 def run_webhook():
     uvicorn.run(sepay_app, host="0.0.0.0", port=8000)
