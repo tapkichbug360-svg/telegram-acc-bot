@@ -1,9 +1,11 @@
 ﻿import asyncio
+import pytz
 import os
 import psycopg2
 import logging
 import threading
 import uvicorn
+from datetime import datetime, timedelta
 from sepay import app as sepay_app
 from datetime import datetime
 from psycopg2.extras import RealDictCursor
@@ -20,7 +22,8 @@ from aiogram.client.default import DefaultBotProperties
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
 ADMIN_IDS = [5180190297, 6448523574]
-ADMIN_USERNAMES = ["minhthune2003", "makkllai"]  # Thêm dòng này
+ADMIN_USERNAMES = ["minhthune2003", "makkllai"]
+VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # Thêm dòng này
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
 
@@ -79,17 +82,30 @@ def init_db():
     conn.close()
     logger.info("✅ Database on VPS initialized")
 
-def get_user(telegram_id: int):  # Giữ nguyên, chỉ đổi trong database
+def get_user(telegram_id: int, username: str = None, full_name: str = None):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
     user = c.fetchone()
     if not user:
-        c.execute("INSERT INTO users (telegram_id, created_at) VALUES (%s, %s)", 
-                  (telegram_id, datetime.now().isoformat()))
+        c.execute("INSERT INTO users (telegram_id, username, full_name, created_at) VALUES (%s, %s, %s, %s)", 
+                  (telegram_id, username, full_name, datetime.now(VIETNAM_TZ).isoformat()))
         conn.commit()
         c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
         user = c.fetchone()
+    else:
+        # Cập nhật tên nếu có thay đổi
+        need_update = False
+        if username and user[1] != username:
+            c.execute("UPDATE users SET username = %s WHERE telegram_id = %s", (username, telegram_id))
+            need_update = True
+        if full_name and user[2] != full_name:
+            c.execute("UPDATE users SET full_name = %s WHERE telegram_id = %s", (full_name, telegram_id))
+            need_update = True
+        if need_update:
+            conn.commit()
+            c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
+            user = c.fetchone()
     conn.close()
     return user
 
@@ -102,7 +118,7 @@ def update_balance(telegram_id: int, amount: int, note: str = ""):
     else:
         c.execute("UPDATE users SET total_spent = total_spent + %s WHERE telegram_id = %s", (-amount, telegram_id))
     c.execute("INSERT INTO recharge_history (user_id, amount, note, created_at) VALUES (%s, %s, %s, %s)",
-              (telegram_id, amount, note, datetime.now().isoformat()))
+              (telegram_id, amount, note, datetime.now(VIETNAM_TZ).isoformat()))
     conn.commit()
     conn.close()
 
@@ -110,7 +126,7 @@ def add_admin_log(admin_id: int, action: str, target_id: int = None, details: st
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("INSERT INTO admin_logs (admin_id, action, target_id, details, created_at) VALUES (%s, %s, %s, %s, %s)",
-              (admin_id, action, target_id, details, datetime.now().isoformat()))
+              (admin_id, action, target_id, details, datetime.now(VIETNAM_TZ).isoformat()))
     conn.commit()
     conn.close()
 
@@ -126,7 +142,7 @@ def mark_sold(account_id: int, user_id: int):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("UPDATE accounts SET is_sold = 1, sold_to = %s, sold_at = %s WHERE id = %s",
-              (user_id, datetime.now().isoformat(), account_id))
+              (user_id, datetime.now(VIETNAM_TZ).isoformat(), account_id))
     conn.commit()
     conn.close()
 
@@ -134,7 +150,7 @@ def save_purchase(user_id: int, account_id: int, site: str, amount: int):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("INSERT INTO purchases (user_id, account_id, site, amount, purchased_at) VALUES (%s, %s, %s, %s, %s)",
-              (user_id, account_id, site, amount, datetime.now().isoformat()))
+              (user_id, account_id, site, amount, datetime.now(VIETNAM_TZ).isoformat()))
     conn.commit()
     conn.close()
 
@@ -146,7 +162,7 @@ def add_account(site: str, username: str, password: str,
     c.execute("""INSERT INTO accounts 
               (site, username, password, withdraw_password, real_name, bank_number, phone, created_at, note) 
               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-              (site, username, password, withdraw_password, real_name, bank_number, phone, datetime.now().isoformat(), note))
+              (site, username, password, withdraw_password, real_name, bank_number, phone, datetime.now(VIETNAM_TZ).isoformat(), note))
     conn.commit()
     conn.close()
 
@@ -155,7 +171,7 @@ def bulk_add_accounts(site: str, accounts: List[Tuple[str, str]]):
     c = conn.cursor()
     for username, password in accounts:
         c.execute("INSERT INTO accounts (site, username, password, created_at) VALUES (%s, %s, %s, %s)",
-                  (site, username, password, datetime.now().isoformat()))
+                  (site, username, password, datetime.now(VIETNAM_TZ).isoformat()))
     conn.commit()
     conn.close()
 
@@ -192,6 +208,20 @@ def get_user_history(user_id: int, limit: int = 20) -> List[Dict]:
         c.execute("SELECT username, password, withdraw_password, real_name, bank_number, phone FROM accounts WHERE id = %s", (p[2],))
         acc = c.fetchone()
         if acc:
+            # Chuyển đổi thời gian từ UTC sang VN
+            try:
+                from datetime import timezone
+                utc_time = datetime.fromisoformat(p[5].replace('T', ' '))
+                # Nếu là UTC, chuyển sang VN (UTC+7)
+                if utc_time.tzinfo is None:
+                    # Giả sử dữ liệu cũ là UTC, cộng thêm 7 giờ
+                    vn_time = utc_time + timedelta(hours=7)
+                else:
+                    vn_time = utc_time.astimezone(VIETNAM_TZ)
+                formatted_date = vn_time.strftime('%H:%M:%S %d/%m/%Y')
+            except:
+                formatted_date = p[5][:19].replace('T', ' ')
+            
             history.append({
                 'site': p[3],
                 'username': acc[0],
@@ -201,7 +231,7 @@ def get_user_history(user_id: int, limit: int = 20) -> List[Dict]:
                 'bank_number': acc[4] or "Chưa có",
                 'phone': acc[5] or "Chưa có",
                 'amount': p[4],
-                'date': p[5][:19]
+                'date': formatted_date
             })
     conn.close()
     return history
@@ -225,7 +255,7 @@ def get_user_count() -> int:
 def get_daily_stats() -> Dict:
     conn = get_db_connection()
     c = conn.cursor()
-    today = datetime.now().date().isoformat()
+    today = datetime.now(VIETNAM_TZ).date().isoformat()
     c.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM purchases WHERE DATE(purchased_at) = %s", (today,))
     sales_count, revenue = c.fetchone()
     c.execute("SELECT COUNT(*) FROM users WHERE DATE(created_at) = %s", (today,))
@@ -266,6 +296,7 @@ def main_menu(user_balance: int = 0):
         [InlineKeyboardButton(text="💰 SỐ DƯ", callback_data="balance")],
         [InlineKeyboardButton(text="📜 LỊCH SỬ", callback_data="history")],
         [InlineKeyboardButton(text="💳 NẠP TIỀN", callback_data="recharge")],
+        [InlineKeyboardButton(text="👤 THÔNG TIN USER", callback_data="myinfo")],
         [InlineKeyboardButton(text="🆘 HỖ TRỢ", callback_data="support")]
     ])
 
@@ -274,6 +305,7 @@ def admin_menu():
         [InlineKeyboardButton(text="📊 DASHBOARD", callback_data="admin_dashboard")],
         [InlineKeyboardButton(text="➕ THÊM ACC", callback_data="admin_add")],
         [InlineKeyboardButton(text="📦 NHẬP NHIỀU", callback_data="admin_bulk_add")],
+        [InlineKeyboardButton(text="🔍 TRA CỨU USER", callback_data="admin_search_user")],
         [InlineKeyboardButton(text="💰 CỘNG TIỀN", callback_data="admin_add_money")],
         [InlineKeyboardButton(text="💸 TRỪ TIỀN", callback_data="admin_sub_money")],
         [InlineKeyboardButton(text="👥 DANH SÁCH USER", callback_data="admin_users")],
@@ -285,7 +317,7 @@ def admin_menu():
 # ==================== USER ====================
 @dp.message(Command("start"))
 async def start(msg: Message):
-    user = get_user(msg.from_user.id)
+    user = get_user(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
     balance = user[3] if user and isinstance(user[3], int) else 0
     
     welcome_text = f"""
@@ -358,6 +390,23 @@ async def process_buy(call: CallbackQuery):
     mark_sold(account[0], call.from_user.id)
     save_purchase(call.from_user.id, account[0], site, price)
     
+    # Gửi thông báo cho admin
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"🛒 <b>CÓ USER MUA ACC</b>\n\n"
+                f"👤 User: {call.from_user.id} (@{call.from_user.username or 'no username'})\n"
+                f"📝 Tên: {call.from_user.full_name}\n"
+                f"🎮 Site: {SITE_EMOJI[site]} {site}\n"
+                f"👤 Username: {account[2]}\n"
+                f"🔑 Password: {account[3]}\n"
+                f"💰 Giá: {price:,}đ\n"
+                f"📅 Thời gian: {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}"
+            )
+        except:
+            pass
+    
     new_balance = balance - price
     
     # Lấy thêm thông tin từ account (index trong tuple)
@@ -399,6 +448,13 @@ async def show_history(call: CallbackQuery):
         return
     text = "📜 <b>LỊCH SỬ MUA HÀNG</b>\n\n"
     for i, h in enumerate(history, 1):
+        # Định dạng lại thời gian
+        try:
+            dt = datetime.fromisoformat(h['date'].replace('T', ' '))
+            formatted_date = dt.strftime('%H:%M:%S %d/%m/%Y')
+        except:
+            formatted_date = h['date']
+        
         text += f"""🔹 <b>#{i}</b>
 🎮 Site: {SITE_EMOJI[h['site']]} {h['site']}
 👤 Username: <code>{h['username']}</code>
@@ -408,9 +464,57 @@ async def show_history(call: CallbackQuery):
 🏦 STK: {h.get('bank_number', 'Chưa có')}
 📱 SĐT: {h.get('phone', 'Chưa có')}
 💰 Giá: {h['amount']:,}đ
-📅 Ngày mua: {h['date']}
+📅 Ngày mua: {formatted_date}
 
 """
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+    ]))
+# ==================== THÔNG TIN USER ====================
+@dp.callback_query(F.data == "myinfo")
+async def show_my_info(call: CallbackQuery):
+    user = get_user(call.from_user.id)
+    if not user:
+        await call.message.edit_text("❌ Không tìm thấy thông tin!")
+        return
+    
+    balance = user[3] if isinstance(user[3], int) else 0
+    total_recharge = user[4] if isinstance(user[4], int) else 0
+    total_spent = user[5] if isinstance(user[5], int) else 0
+    # Định dạng thời gian
+    if user[6]:
+        try:
+            # Chuyển đổi ISO sang datetime
+            dt = datetime.fromisoformat(user[6].replace('T', ' '))
+            created_at = dt.strftime('%H:%M:%S %d/%m/%Y')
+        except:
+            created_at = user[6][:19].replace('T', ' ')
+    else:
+        created_at = "Không rõ"
+    
+    # Lấy số lần mua
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM purchases WHERE user_id = %s", (call.from_user.id,))
+    purchase_count = c.fetchone()[0]
+    conn.close()
+    
+    text = f"""
+👤 <b>THÔNG TIN CỦA BẠN</b>
+
+🆔 <b>User ID:</b> <code>{call.from_user.id}</code>
+📝 <b>Tên:</b> {call.from_user.full_name}
+💬 <b>Username:</b> @{call.from_user.username or 'chưa có'}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+💰 <b>Số dư:</b> {balance:,}đ
+📥 <b>Tổng nạp:</b> {total_recharge:,}đ
+📤 <b>Tổng chi:</b> {total_spent:,}đ
+📦 <b>Số lần mua:</b> {purchase_count}
+
+📅 <b>Ngày tham gia:</b> {created_at}
+"""
+    
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
@@ -546,7 +650,7 @@ async def process_recharge_bill(msg: Message, state: FSMContext):
 
 💰 <b>Số tiền:</b> {amount:,}đ
 🔑 <b>Mã GD:</b> <code>{trans_code}</code>
-📅 <b>Thời gian:</b> {datetime.now().strftime('%H:%M:%S %d/%m/%Y')}
+📅 <b>Thời gian:</b> {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}
 
 📌 <b>Hành động:</b> Dùng lệnh <code>/addmoney {msg.from_user.id} {amount}</code> để cộng tiền
 """
@@ -592,6 +696,61 @@ async def back_menu(call: CallbackQuery):
     )
 
 # ==================== ADMIN ====================
+# ==================== CHAT ALL ====================
+@dp.message(Command("chatall"))
+async def chat_all(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    
+    # Lấy nội dung tin nhắn (bỏ qua lệnh /chatall)
+    text = msg.text.replace("/chatall", "").strip()
+    if not text:
+        await msg.answer("❌ Sai format!\nDùng: /chatall nội_dung_tin_nhắn")
+        return
+    
+    # Thông báo đang gửi
+    status_msg = await msg.answer("🔄 Đang gửi tin nhắn đến tất cả user...")
+    
+    # Lấy danh sách user
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT telegram_id FROM users")
+    users = c.fetchall()
+    conn.close()
+    
+    if not users:
+        await status_msg.edit_text("📭 Không có user nào để gửi!")
+        return
+    
+    success = 0
+    fail = 0
+    
+    for i, user in enumerate(users):
+        try:
+            await bot.send_message(
+                user[0], 
+                f"📢 <b>THÔNG BÁO TỪ ADMIN</b>\n\n{text}",
+                parse_mode=ParseMode.HTML
+            )
+            success += 1
+        except Exception as e:
+            fail += 1
+            print(f"Lỗi gửi đến {user[0]}: {e}")
+        
+        # Cứ 30 user thì nghỉ 0.5 giây để tránh spam
+        if (i + 1) % 30 == 0:
+            await asyncio.sleep(0.5)
+    
+    await status_msg.edit_text(
+        f"✅ <b>ĐÃ GỬI XONG!</b>\n\n"
+        f"📨 Thành công: {success} user\n"
+        f"❌ Thất bại: {fail} user\n"
+        f"📝 Nội dung: {text[:100]}..."
+    )
+    
+    # Ghi log
+    add_admin_log(msg.from_user.id, "chat_all", None, f"Gửi tin nhắn đến {success} user")
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message, state: FSMContext):
     # Clear state để tránh lỗi
@@ -885,8 +1044,17 @@ async def admin_users(call: CallbackQuery):
     for i, u in enumerate(users, 1):
         balance = u[3] if isinstance(u[3], int) else 0
         total_recharge = u[4] if isinstance(u[4], int) else 0
+        
+        # Hiển thị tên
+        if u[2] and u[2] != "None":
+            display_name = u[2]
+        elif u[1] and u[1] != "None":
+            display_name = f"@{u[1]}"
+        else:
+            display_name = f"User {u[0]}"
+        
         text += f"{i}. 🆔 <code>{u[0]}</code>\n"
-        text += f"   👤 {u[2] or u[1] or 'No name'}\n"
+        text += f"   👤 {display_name}\n"
         text += f"   💰 {balance:,}đ | 📥 {total_recharge:,}đ\n\n"
     await call.message.edit_text(text, reply_markup=admin_menu())
 
@@ -1081,6 +1249,183 @@ async def user_info(msg: Message, state: FSMContext):
     
     await msg.answer(text)
     conn.close()
+class SearchUserState(StatesGroup):
+    waiting_for_user_id = State()
+
+@dp.callback_query(F.data == "admin_search_user")
+async def admin_search_user(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Không có quyền!", show_alert=True)
+        return
+    
+    await call.message.edit_text(
+        "🔍 <b>TRA CỨU THÔNG TIN USER</b>\n\n"
+        "Nhập ID Telegram của user cần xem:\n"
+        "Ví dụ: <code>5180190297</code>\n\n"
+        "Hoặc nhập username: <code>@makkllai</code>\n\n"
+        "Gửi /cancel để hủy"
+    )
+    await state.set_state(SearchUserState.waiting_for_user_id)
+
+@dp.message(SearchUserState.waiting_for_user_id)
+async def admin_show_user_info(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    if msg.text == "/cancel":
+        await state.clear()
+        await msg.answer("❌ Đã hủy!")
+        return
+    
+    search_key = msg.text.strip()
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Tìm user theo ID hoặc username
+    if search_key.startswith('@'):
+        username = search_key[1:]
+        c.execute("SELECT telegram_id, username, full_name, balance, total_recharge, total_spent, created_at FROM users WHERE username = %s", (username,))
+    else:
+        try:
+            user_id = int(search_key)
+            c.execute("SELECT telegram_id, username, full_name, balance, total_recharge, total_spent, created_at FROM users WHERE telegram_id = %s", (user_id,))
+        except ValueError:
+            await msg.answer("❌ ID không hợp lệ! Vui lòng nhập số ID hoặc username có @")
+            conn.close()
+            return
+    
+    user = c.fetchone()
+    
+    if not user:
+        await msg.answer(f"❌ Không tìm thấy user: {search_key}")
+        conn.close()
+        return
+    
+    # Lấy danh sách acc đã mua
+    c.execute("""
+        SELECT p.site, a.username, a.password, a.withdraw_password, a.real_name, a.bank_number, a.phone, p.amount, p.purchased_at 
+        FROM purchases p 
+        JOIN accounts a ON p.account_id = a.id 
+        WHERE p.user_id = %s 
+        ORDER BY p.purchased_at DESC
+    """, (user[0],))
+    purchases = c.fetchall()
+    conn.close()
+    
+    # Format thời gian
+    created_time = user[6].replace('T', ' ')[:19] if user[6] else "Không rõ"
+    
+    text = f"""👤 <b>THÔNG TIN USER</b>
+
+🆔 <b>ID:</b> <code>{user[0]}</code>
+📝 <b>Tên:</b> {user[2] or user[1] or 'Chưa có'}
+💬 <b>Username:</b> @{user[1] or 'chưa có'}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+💰 <b>Số dư:</b> {user[3]:,}đ
+📥 <b>Tổng nạp:</b> {user[4]:,}đ
+📤 <b>Tổng chi:</b> {user[5]:,}đ
+📦 <b>Số acc đã mua:</b> {len(purchases)}
+📅 <b>Ngày tham gia:</b> {created_time}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+🎮 <b>DANH SÁCH ACC ĐÃ MUA:</b>
+"""
+    
+    if purchases:
+        for i, p in enumerate(purchases, 1):
+            time_str = p[8].replace('T', ' ')[:19] if p[8] else "Không rõ"
+            text += f"\n🔹 <b>#{i}</b> - {SITE_EMOJI.get(p[0], '🎮')} {p[0]}\n"
+            text += f"   👤 {p[1]}:{p[2]}\n"
+            text += f"   🔐 MK Rút: {p[3] or 'Chưa có'}\n"
+            text += f"   📝 Tên thật: {p[4] or 'Chưa có'}\n"
+            text += f"   🏦 STK: {p[5] or 'Chưa có'}\n"
+            text += f"   📱 SĐT: {p[6] or 'Chưa có'}\n"
+            text += f"   💰 Giá: {p[7]:,}đ | 📅 {time_str}\n"
+    else:
+        text += "\n📭 Chưa mua account nào"
+    
+    # Thêm nút hành động
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 CỘNG TIỀN", callback_data=f"admin_add_money_user_{user[0]}")],
+        [InlineKeyboardButton(text="💸 TRỪ TIỀN", callback_data=f"admin_sub_money_user_{user[0]}")],
+        [InlineKeyboardButton(text="🔍 TRA CỨU USER KHÁC", callback_data="admin_search_user")],
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="admin_dashboard")]
+    ])
+    
+    await msg.answer(text, reply_markup=keyboard)
+    await state.clear()
+
+# Hỗ trợ cộng/trừ tiền nhanh từ kết quả tra cứu
+@dp.callback_query(F.data.startswith("admin_add_money_user_"))
+async def admin_add_money_from_search(call: CallbackQuery, state: FSMContext):
+    user_id = int(call.data.split("_")[4])
+    await state.update_data(user_id=user_id, action="add")
+    await call.message.answer(f"💰 Nhập số tiền muốn CỘNG cho user {user_id}:")
+    await state.set_state(MoneyState.waiting_for_amount)
+
+@dp.callback_query(F.data.startswith("admin_sub_money_user_"))
+async def admin_sub_money_from_search(call: CallbackQuery, state: FSMContext):
+    user_id = int(call.data.split("_")[4])
+    await state.update_data(user_id=user_id, action="sub")
+    await call.message.answer(f"💸 Nhập số tiền muốn TRỪ cho user {user_id}:")
+    await state.set_state(MoneyState.waiting_for_amount)
+
+# Sửa lại hàm process_money để hỗ trợ user_id từ state
+@dp.message(MoneyState.waiting_for_amount)
+async def process_money(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    if msg.text == "/cancel":
+        await state.clear()
+        await msg.answer("❌ Đã hủy!")
+        return
+    try:
+        amount = int(msg.text.strip())
+        data = await state.get_data()
+        user_id = data.get('user_id')
+        action = data.get('action', 'add')
+        
+        # Nếu không có user_id trong state, hỏi lại
+        if not user_id:
+            parts = msg.text.split()
+            if len(parts) >= 2:
+                user_id = int(parts[0])
+                amount = int(parts[1])
+            else:
+                await msg.answer("❌ Sai format!\nDùng: <code>user_id số_tiền</code>\nVí dụ: <code>5180190297 50000</code>")
+                return
+        
+        if action == "sub":
+            amount = -amount
+        
+        user = get_user(user_id)
+        if not user:
+            await msg.answer(f"❌ Không tìm thấy user ID: {user_id}")
+            return
+        
+        old_balance = user[3] if user and isinstance(user[3], int) else 0
+        update_balance(user_id, amount, f"Admin {'cộng' if amount > 0 else 'trừ'} {abs(amount)}đ")
+        add_admin_log(msg.from_user.id, f"{'add' if amount > 0 else 'sub'}_money", user_id, f"{abs(amount)}đ")
+        new_user = get_user(user_id)
+        new_balance = new_user[3] if new_user and isinstance(new_user[3], int) else 0
+        
+        await msg.answer(
+            f"✅ Đã {'cộng' if amount > 0 else 'trừ'} {abs(amount):,}đ cho user {user_id}\n"
+            f"💰 Số dư cũ: {old_balance:,}đ → Số dư mới: {new_balance:,}đ"
+        )
+        
+        # Thông báo cho user
+        if amount > 0:
+            await notify_user(user_id, "NẠP TIỀN THÀNH CÔNG", f"💵 Số tiền: {amount:,}đ\n💰 Số dư mới: {new_balance:,}đ")
+        else:
+            await notify_user(user_id, "TRỪ TIỀN TÀI KHOẢN", f"💸 Số tiền: {abs(amount):,}đ\n💰 Số dư mới: {new_balance:,}đ")
+        
+        await state.clear()
+        await msg.answer("👑 ADMIN PANEL", reply_markup=admin_menu())
+        
+    except Exception as e:
+        await msg.answer(f"❌ Lỗi: {str(e)}\nDùng: <code>user_id số_tiền</code>")
 # ==================== CHẠY WEBHOOK ====================
 def run_webhook():
     uvicorn.run(sepay_app, host="0.0.0.0", port=8000)
