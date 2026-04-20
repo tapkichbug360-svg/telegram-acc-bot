@@ -1,5 +1,6 @@
 ﻿import asyncio
 import pytz
+import aiohttp
 import os
 import psycopg2
 import logging
@@ -19,10 +20,45 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
+# ==================== MIGRATE DATABASE LOCAL ====================
+def fix_ref_code():
+    """Sửa ref_code cho user cũ trên local"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Kiểm tra xem cột ref_code có tồn tại chưa
+    try:
+        c.execute("SELECT ref_code FROM users LIMIT 1")
+    except Exception:
+        print("⚠️ Cột ref_code chưa tồn tại, đang thêm...")
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN ref_by BIGINT DEFAULT NULL")
+            c.execute("ALTER TABLE users ADD COLUMN ref_code TEXT UNIQUE")
+            c.execute("ALTER TABLE users ADD COLUMN total_ref_commission BIGINT DEFAULT 0")
+            print("✅ Đã thêm các cột mới")
+        except Exception as e:
+            print(f"Lỗi: {e}")
+    
+    # Cập nhật ref_code cho user bị NULL
+    try:
+        c.execute("SELECT telegram_id FROM users WHERE ref_code IS NULL")
+        null_users = c.fetchall()
+        import random
+        import string
+        for user in null_users:
+            new_ref_code = f"REF{user[0]}{''.join(random.choices(string.digits, k=4))}"
+            c.execute("UPDATE users SET ref_code = %s WHERE telegram_id = %s", (new_ref_code, user[0]))
+            print(f"✅ Đã tạo ref_code cho user {user[0]}: {new_ref_code}")
+        conn.commit()
+    except Exception as e:
+        print(f"Lỗi cập nhật: {e}")
+    
+    conn.close()
+
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
-ADMIN_IDS = [5180190297, 6448523574]
-ADMIN_USERNAMES = ["minhthune2003", "makkllai"]
+ADMIN_IDS = [5180190297]
+ADMIN_USERNAMES = ["makkllai"]
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # Thêm dòng này
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
@@ -42,6 +78,20 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
+    # Thêm vào hàm init_db()
+    c.execute('''CREATE TABLE IF NOT EXISTS otp_rentals (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        request_id TEXT,
+        phone_number TEXT,
+        service_name TEXT,
+        price INTEGER,
+        code TEXT,
+        sms_content TEXT,
+        status INTEGER DEFAULT 0,
+        rented_at TEXT,
+        refunded INTEGER DEFAULT 0
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         telegram_id BIGINT PRIMARY KEY,
         username TEXT,
@@ -49,7 +99,20 @@ def init_db():
         balance BIGINT DEFAULT 0,
         total_recharge BIGINT DEFAULT 0,
         total_spent BIGINT DEFAULT 0,
-        created_at TEXT)''')
+        created_at TEXT,
+        ref_by BIGINT DEFAULT NULL,
+        ref_code TEXT UNIQUE,
+        total_ref_commission BIGINT DEFAULT 0
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS ref_commissions (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        ref_user_id BIGINT,
+        amount INTEGER,
+        note TEXT,
+        created_at TEXT
+    )''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS accounts (
         id SERIAL PRIMARY KEY,
@@ -82,19 +145,40 @@ def init_db():
     conn.close()
     logger.info("✅ Database on VPS initialized")
 
-def get_user(telegram_id: int, username: str = None, full_name: str = None):
+def get_user(telegram_id: int, username: str = None, full_name: str = None, ref_by: int = None):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
     user = c.fetchone()
+    
     if not user:
-        c.execute("INSERT INTO users (telegram_id, username, full_name, created_at) VALUES (%s, %s, %s, %s)", 
-                  (telegram_id, username, full_name, datetime.now(VIETNAM_TZ).isoformat()))
+        # User chưa tồn tại - Tạo mới
+        ref_code = generate_ref_code(telegram_id)
+        print(f"[DEBUG] Tạo user mới: {telegram_id}, ref_by={ref_by}")
+        
+        c.execute("""INSERT INTO users (telegram_id, username, full_name, created_at, ref_by, ref_code) 
+                     VALUES (%s, %s, %s, %s, %s, %s)""", 
+                  (telegram_id, username, full_name, datetime.now(VIETNAM_TZ).isoformat(), ref_by, ref_code))
         conn.commit()
+        
+        if ref_by:
+            try:
+                import asyncio
+                asyncio.create_task(bot.send_message(
+                    ref_by,
+                    f"👥 <b>GIỚI THIỆU MỚI</b>\n\n"
+                    f"🎉 Bạn vừa giới thiệu user mới: @{username or full_name or str(telegram_id)}\n"
+                    f"💰 Sẽ nhận 5% hoa hồng từ mỗi lần nạp của user này!"
+                ))
+                print(f"[DEBUG] Đã gửi thông báo cho người giới thiệu {ref_by}")
+            except Exception as e:
+                print(f"[DEBUG] Lỗi gửi thông báo: {e}")
+        
         c.execute("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
         user = c.fetchone()
     else:
-        # Cập nhật tên nếu có thay đổi
+        # User đã tồn tại - Không cập nhật ref_by (chỉ cập nhật tên)
+        print(f"[DEBUG] User đã tồn tại: {telegram_id}, bỏ qua ref_by")
         need_update = False
         if username and user[1] != username:
             c.execute("UPDATE users SET username = %s WHERE telegram_id = %s", (username, telegram_id))
@@ -115,8 +199,32 @@ def update_balance(telegram_id: int, amount: int, note: str = ""):
     c.execute("UPDATE users SET balance = balance + %s WHERE telegram_id = %s", (amount, telegram_id))
     if amount > 0:
         c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
+        
+        # Tính hoa hồng 5% cho người giới thiệu
+        c.execute("SELECT ref_by FROM users WHERE telegram_id = %s", (telegram_id,))
+        ref_by = c.fetchone()
+        
+        if ref_by and ref_by[0]:
+            commission = int(amount * 0.05)
+            if commission > 0:
+                add_ref_commission(telegram_id, ref_by[0], commission, f"Hoa hồng 5% từ nạp {amount:,}đ của user {telegram_id}")
+                
+                try:
+                    import asyncio
+                    asyncio.create_task(bot.send_message(
+                        ref_by[0],
+                        f"💰 <b>NHẬN HOA HỒNG GIỚI THIỆU</b>\n\n"
+                        f"👤 User bạn giới thiệu: <code>{telegram_id}</code>\n"
+                        f"💵 Nạp: {amount:,}đ\n"
+                        f"🎁 Hoa hồng 5%: <b>{commission:,}đ</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"💡 Tiền đã được cộng vào số dư của bạn!"
+                    ))
+                except:
+                    pass
     else:
         c.execute("UPDATE users SET total_spent = total_spent + %s WHERE telegram_id = %s", (-amount, telegram_id))
+    
     c.execute("INSERT INTO recharge_history (user_id, amount, note, created_at) VALUES (%s, %s, %s, %s)",
               (telegram_id, amount, note, datetime.now(VIETNAM_TZ).isoformat()))
     conn.commit()
@@ -197,7 +305,69 @@ def get_sold_stats() -> Tuple[Dict, Dict]:
         revenue[site] = total or 0
     conn.close()
     return sold, revenue
-
+# ==================== MIGRATE DATABASE ====================
+def migrate_db():
+    """Thêm các cột mới cho tính năng referral nếu chưa có"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Thêm cột ref_by
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN ref_by BIGINT DEFAULT NULL")
+        print("✅ Đã thêm cột ref_by")
+    except Exception as e:
+        if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+            print("ℹ️ Cột ref_by đã tồn tại")
+        else:
+            print(f"⚠️ Lỗi khi thêm ref_by: {e}")
+    
+    # Thêm cột ref_code
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN ref_code TEXT UNIQUE")
+        print("✅ Đã thêm cột ref_code")
+    except Exception as e:
+        if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+            print("ℹ️ Cột ref_code đã tồn tại")
+        else:
+            print(f"⚠️ Lỗi khi thêm ref_code: {e}")
+    
+    # Thêm cột total_ref_commission
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN total_ref_commission BIGINT DEFAULT 0")
+        print("✅ Đã thêm cột total_ref_commission")
+    except Exception as e:
+        if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+            print("ℹ️ Cột total_ref_commission đã tồn tại")
+        else:
+            print(f"⚠️ Lỗi khi thêm total_ref_commission: {e}")
+    
+    # Tạo bảng ref_commissions nếu chưa có
+    try:
+        c.execute('''CREATE TABLE IF NOT EXISTS ref_commissions (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            ref_user_id BIGINT,
+            amount INTEGER,
+            note TEXT,
+            created_at TEXT
+        )''')
+        print("✅ Đã tạo bảng ref_commissions")
+    except Exception as e:
+        print(f"⚠️ Lỗi tạo bảng ref_commissions: {e}")
+    
+    # Cập nhật ref_code cho user cũ bị NULL
+    try:
+        c.execute("SELECT telegram_id FROM users WHERE ref_code IS NULL")
+        null_users = c.fetchall()
+        for user in null_users:
+            new_ref_code = generate_ref_code(user[0])
+            c.execute("UPDATE users SET ref_code = %s WHERE telegram_id = %s", (new_ref_code, user[0]))
+        print(f"✅ Đã cập nhật ref_code cho {len(null_users)} user cũ")
+    except Exception as e:
+        print(f"⚠️ Lỗi cập nhật ref_code: {e}")
+    
+    conn.commit()
+    conn.close()
 def get_user_history(user_id: int, limit: int = 20) -> List[Dict]:
     conn = get_db_connection()
     c = conn.cursor()
@@ -262,6 +432,38 @@ def get_daily_stats() -> Dict:
     new_users = c.fetchone()[0]
     conn.close()
     return {'sales': sales_count or 0, 'revenue': revenue or 0, 'new_users': new_users}
+
+# ==================== REFERRAL ====================
+import random
+import string
+
+def generate_ref_code(telegram_id: int) -> str:
+    """Tạo mã giới thiệu duy nhất"""
+    return f"REF{telegram_id}{''.join(random.choices(string.digits, k=4))}"
+
+def get_user_by_ref_code(ref_code: str):
+    """Tìm user theo mã giới thiệu"""
+    if not ref_code or ref_code == "None" or ref_code == "null":
+        return None
+    conn = get_db_connection()
+    c = conn.cursor()
+    ref_code = ref_code.strip()
+    c.execute("SELECT telegram_id FROM users WHERE ref_code = %s", (ref_code,))
+    user = c.fetchone()
+    conn.close()
+    print(f"[DEBUG] Tìm ref_code '{ref_code}': {user[0] if user else 'Không tìm thấy'}")
+    return user[0] if user else None
+
+def add_ref_commission(user_id: int, ref_user_id: int, amount: int, note: str = ""):
+    """Thêm hoa hồng cho người giới thiệu"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE users SET balance = balance + %s, total_ref_commission = total_ref_commission + %s WHERE telegram_id = %s", 
+              (amount, amount, ref_user_id))
+    c.execute("INSERT INTO ref_commissions (user_id, ref_user_id, amount, note, created_at) VALUES (%s, %s, %s, %s, %s)",
+              (user_id, ref_user_id, amount, note, datetime.now(VIETNAM_TZ).isoformat()))
+    conn.commit()
+    conn.close()
 # ==================== THÔNG BÁO USER ====================
 async def notify_user(user_id: int, title: str, message: str, success: bool = True):
     """Gửi thông báo đến user"""
@@ -292,10 +494,11 @@ class RechargeState(StatesGroup):
 
 def main_menu(user_balance: int = 0):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 MUA ACC", callback_data="buy")],
+        [InlineKeyboardButton(text="🛒 MUA ACC", callback_data="buy"), InlineKeyboardButton(text="🔐 THUÊ OTP", callback_data="otp_menu")],
         [InlineKeyboardButton(text="💰 SỐ DƯ", callback_data="balance")],
         [InlineKeyboardButton(text="📜 LỊCH SỬ", callback_data="history")],
         [InlineKeyboardButton(text="💳 NẠP TIỀN", callback_data="recharge")],
+        [InlineKeyboardButton(text="👥 GIỚI THIỆU", callback_data="ref_info")],
         [InlineKeyboardButton(text="👤 THÔNG TIN USER", callback_data="myinfo")],
         [InlineKeyboardButton(text="🆘 HỖ TRỢ", callback_data="support")]
     ])
@@ -313,11 +516,89 @@ def admin_menu():
         [InlineKeyboardButton(text="💰 DOANH THU", callback_data="admin_revenue")],
         [InlineKeyboardButton(text="⚙️ CÀI GIÁ", callback_data="admin_price")]
     ])
+@dp.callback_query(F.data == "ref_info")
+async def ref_info_callback(call: CallbackQuery):
+    user = get_user(call.from_user.id)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users WHERE ref_by = %s", (call.from_user.id,))
+    ref_count = c.fetchone()[0]
+    c.execute("SELECT total_ref_commission, ref_code FROM users WHERE telegram_id = %s", (call.from_user.id,))
+    row = c.fetchone()
+    total_commission = row[0] if row[0] else 0
+    ref_code = row[1]
+    conn.close()
+    
+    bot_username = (await bot.get_me()).username
+    
+    # Nếu ref_code bị None, tạo mới
+    if not ref_code or ref_code == "None":
+        ref_code = generate_ref_code(call.from_user.id)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE users SET ref_code = %s WHERE telegram_id = %s", (ref_code, call.from_user.id))
+        conn.commit()
+        conn.close()
+        print(f"[DEBUG] Đã tạo ref_code mới cho user {call.from_user.id}: {ref_code}")
+    
+    text = f"""
+👥 <b>GIỚI THIỆU BẠN BÈ</b>
 
+🔗 <b>Link giới thiệu:</b>
+<code>https://t.me/{bot_username}?start={ref_code}</code>
+
+📋 <b>Mã giới thiệu:</b>
+<code>{ref_code}</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>Thống kê của bạn:</b>
+• Số người đã giới thiệu: {ref_count}
+• Tổng hoa hồng nhận được: {total_commission:,}đ
+
+💰 <b>Hoa hồng:</b> 5% mỗi lần người được giới thiệu nạp tiền
+
+💡 <b>Hướng dẫn:</b>
+1. Gửi link trên cho bạn bè
+2. Bạn bè đăng ký qua link của bạn
+3. Bạn nhận 5% hoa hồng từ mỗi lần họ nạp tiền
+"""
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+    ]))
 # ==================== USER ====================
 @dp.message(Command("start"))
 async def start(msg: Message):
-    user = get_user(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
+    # Xử lý mã giới thiệu
+    args = msg.text.split()
+    ref_code = args[1] if len(args) > 1 else None
+    
+    print(f"[DEBUG] User {msg.from_user.id} start với ref_code: {ref_code}")
+    
+    ref_by = None
+    if ref_code and ref_code != "None" and ref_code != "null":
+        ref_by = get_user_by_ref_code(ref_code)
+        print(f"[DEBUG] Tìm thấy ref_by: {ref_by}")
+        if ref_by == msg.from_user.id:
+            ref_by = None
+            print(f"[DEBUG] Không tự giới thiệu chính mình")
+    
+    # Kiểm tra user đã tồn tại chưa
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT telegram_id FROM users WHERE telegram_id = %s", (msg.from_user.id,))
+    existing_user = c.fetchone()
+    conn.close()
+    
+    if existing_user:
+        # User đã tồn tại, không cập nhật ref_by
+        print(f"[DEBUG] User {msg.from_user.id} đã tồn tại, bỏ qua ref_by")
+        user = get_user(msg.from_user.id, msg.from_user.username, msg.from_user.full_name)
+    else:
+        # User mới, cập nhật ref_by
+        print(f"[DEBUG] Tạo user mới {msg.from_user.id} với ref_by={ref_by}")
+        user = get_user(msg.from_user.id, msg.from_user.username, msg.from_user.full_name, ref_by)
+    
     balance = user[3] if user and isinstance(user[3], int) else 0
     
     welcome_text = f"""
@@ -439,14 +720,14 @@ async def process_buy(call: CallbackQuery):
 
 @dp.callback_query(F.data == "history")
 async def show_history(call: CallbackQuery):
-    history = get_user_history(call.from_user.id)
+    history = get_user_history(call.from_user.id, limit=15)
     if not history:
         await call.message.edit_text("📭 Bạn chưa mua acc nào!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛒 Mua ngay", callback_data="buy")],
             [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
         ]))
         return
-    text = "📜 <b>LỊCH SỬ MUA HÀNG</b>\n\n"
+    text = "📜 <b>LỊCH SỬ MUA HÀNG</b> <i>(15 acc mới nhất)</i>\n\n"
     for i, h in enumerate(history, 1):
         # Định dạng lại thời gian
         try:
@@ -470,6 +751,391 @@ async def show_history(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
+
+# ==================== THUÊ OTP (OKEDA - 5 SITE) ====================
+import asyncio
+import aiohttp
+import json
+
+# Cấu hình OKVIP API
+OKVIP_TOKEN = "239e39474dfb4e72903ff527c2b26d46"
+OKVIP_API_URL = "https://api.viotp.com"
+
+# Service ID của Okeda (tự động lấy từ API)
+OKEDA_SERVICE_ID = None
+
+# Giá thuê OTP
+OTP_PRICE = 2820
+
+# Danh sách 5 dịch vụ (chỉ để hiển thị, tất cả đều dùng OKEDA)
+OTP_SERVICES = ["CM88", "SC88", "FLY88", "F168", "C168"]
+OTP_SERVICE_EMOJI = {"CM88": "🎰", "SC88": "🎲", "FLY88": "✈️", "F168": "🏆", "C168": "🃏"}
+
+# Lưu trữ nhiều phiên thuê OTP (cho phép nhiều số cùng lúc)
+# Cấu trúc: {user_id: [session1, session2, ...]}
+otp_sessions = {}
+
+async def call_viotp_api(endpoint: str, params: dict = None) -> dict:
+    """Gọi API ViOTP"""
+    if params is None:
+        params = {}
+    params['token'] = OKVIP_TOKEN
+    url = f"{OKVIP_API_URL}/{endpoint}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            return await resp.json()
+
+async def get_okeda_service_id() -> int:
+    """Lấy service ID của Okeda từ API"""
+    global OKEDA_SERVICE_ID
+    if OKEDA_SERVICE_ID:
+        return OKEDA_SERVICE_ID
+    
+    result = await call_viotp_api("service/getv2", {"country": "vn"})
+    if result.get('success'):
+        services = result.get('data', [])
+        for sv in services:
+            if 'okeda' in sv.get('name', '').lower():
+                OKEDA_SERVICE_ID = sv.get('id')
+                print(f"✅ Tìm thấy OKEDA Service ID: {OKEDA_SERVICE_ID}")
+                return OKEDA_SERVICE_ID
+    print("❌ Không tìm thấy OKEDA trong danh sách dịch vụ")
+    return None
+
+def otp_service_menu():
+    """Menu chọn 5 dịch vụ OTP"""
+    buttons = []
+    for service in OTP_SERVICES:
+        buttons.append([InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[service]} {service}", callback_data=f"otp_buy_{service}")])
+    buttons.append([InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@dp.callback_query(F.data == "otp_menu")
+async def otp_service_handler(call: CallbackQuery):
+    """Hiển thị menu chọn 5 dịch vụ OTP"""
+    # Đếm số phiên đang thuê
+    user_sessions = otp_sessions.get(call.from_user.id, [])
+    active_count = len(user_sessions)
+    
+    text = f"""
+🔐 <b>THUÊ OTP</b>
+
+💰 <b>Giá mỗi số:</b> {OTP_PRICE:,}đ
+📱 <b>Đang thuê:</b> {active_count} số
+
+📋 <b>Chọn dịch vụ:</b>
+"""
+    await call.message.answer(text, reply_markup=otp_service_menu())  # ✅ Gọi hàm tạo menu
+
+@dp.callback_query(F.data.startswith("otp_buy_"))
+async def otp_buy_handler(call: CallbackQuery):
+    """Xử lý thuê OTP - Tất cả site đều dùng OKEDA, cho phép thuê nhiều số cùng lúc"""
+    service = call.data.split("_")[2]  # CM88, SC88, FLY88, F168, C168
+    
+    user = get_user(call.from_user.id)
+    balance = user[3] if isinstance(user[3], int) else 0
+    
+    if balance < OTP_PRICE:
+        await call.answer(f"❌ Số dư không đủ! Cần {OTP_PRICE:,}đ. Bạn có {balance:,}đ", show_alert=True)
+        return
+    
+    # Lấy service ID của Okeda
+    service_id = await get_okeda_service_id()
+    if not service_id:
+        await call.answer("❌ Không tìm thấy dịch vụ ! Vui lòng liên hệ Admin.", show_alert=True)
+        return
+    
+    # Gọi API thuê số OTP - DÙNG CHUNG OKEDA
+    result = await call_viotp_api("request/getv2", {"serviceId": service_id})
+    
+    if not result.get('success'):
+        error_msg = result.get('message', 'Lỗi không xác định')
+        await call.answer(f"❌ Lỗi API : {error_msg}", show_alert=True)
+        return
+    
+    data = result.get('data', {})
+    phone = data.get('phone_number')
+    re_phone_number = data.get('re_phone_number')  # Thêm dòng này
+    request_id = data.get('request_id')
+    
+    if not phone or not request_id:
+        await call.answer("❌ Không lấy được số điện thoại từ API!", show_alert=True)
+        return
+    
+    # Trừ tiền SAU KHI API thành công
+    update_balance(call.from_user.id, -OTP_PRICE, f"Thuê OTP {service}")
+    new_balance = balance - OTP_PRICE
+    
+    # Tạo session mới
+    session_id = f"{service}_{request_id}_{int(datetime.now().timestamp())}"
+    session = {
+        'id': session_id,
+        'service': service,
+        'request_id': request_id,
+        'phone': phone,
+        'start_time': datetime.now(VIETNAM_TZ)
+    }
+    
+    # Thêm vào danh sách session của user (cho phép nhiều số)
+    if call.from_user.id not in otp_sessions:
+        otp_sessions[call.from_user.id] = []
+    otp_sessions[call.from_user.id].append(session)
+    
+    current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
+    active_count = len(otp_sessions[call.from_user.id])
+    
+    # Gửi tin nhắn báo thuê thành công (HIỂN THỊ ĐẦY ĐỦ SDT + DỊCH VỤ + THỜI GIAN)
+    await call.message.answer(
+        f"✅ <b>THUÊ OTP THÀNH CÔNG!</b>\n\n"
+        f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+        f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+        f"⏰ <b>Thời gian:</b> {current_time}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Giá:</b> {OTP_PRICE:,}đ\n"
+        f"💵 <b>Số dư còn:</b> {new_balance:,}đ\n"
+        f"📊 <b>Đang thuê:</b> {active_count} số\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ <b>Đang chờ OTP...</b> (tối đa 6 phút/số)\n"
+        f"💡 Bạn có thể <b>thuê thêm số khác</b> ngay bây giờ!\n\n"
+        f"📌 <b>Lưu ý:</b> Hãy xin lại OTP vài lần để tăng tỉ lệ mã về nhé!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔐 Thuê tiếp số khác", callback_data="otp_menu")],
+            [InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history")],
+            [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+        ])
+    )
+    
+    # Chạy vòng lặp check OTP riêng cho từng session
+    asyncio.create_task(check_otp_loop(call.from_user.id, session_id, request_id, service, phone))
+
+async def check_otp_loop(user_id: int, session_id: str, request_id: str, service: str, phone: str):
+    """Vòng lặp check OTP mỗi 2 giây, tự động hoàn tiền sau 6 phút"""
+    start_time = datetime.now(VIETNAM_TZ)
+    timeout_minutes = 6
+    
+    while True:
+        elapsed = (datetime.now(VIETNAM_TZ) - start_time).total_seconds() / 60
+        
+        # Hết 6 phút -> hoàn tiền
+        if elapsed >= timeout_minutes:
+            update_balance(user_id, OTP_PRICE, f"Hoàn tiền thuê OTP {service} - hết 6 phút")
+            
+            await bot.send_message(
+                user_id,
+                f"❌ <b>HẾT THỜI GIAN CHỜ OTP</b>\n\n"
+                f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                f"📱 <b>Số:</b> <code>{phone}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ Đã chờ {timeout_minutes} phút nhưng không nhận được OTP.\n"
+                f"💰 <b>Đã hoàn tiền:</b> {OTP_PRICE:,}đ\n"
+                f"💡 Vui lòng thử lại sau!"
+            )
+            
+            # Xóa session khỏi danh sách
+            if user_id in otp_sessions:
+                otp_sessions[user_id] = [s for s in otp_sessions[user_id] if s['id'] != session_id]
+                if not otp_sessions[user_id]:
+                    del otp_sessions[user_id]
+            return
+        
+        # Gọi API check OTP
+        try:
+            result = await call_viotp_api("session/getv2", {"requestId": request_id})
+            
+            if result.get('success'):
+                data = result.get('data', {})
+                status = data.get('Status')
+                
+                # Status = 1 là đã có OTP
+                if status == 1:
+                    code = data.get('Code', '')
+                    sms_content = data.get('SmsContent', '')
+                    is_sound = data.get('IsSound', False)
+                    phone = data.get('Phone', '')
+                    re_phone = data.get('PhoneOriginal', phone)
+                    
+                    # Lưu vào database
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute("""
+                        INSERT INTO otp_rentals (user_id, request_id, phone_number, service_name, price, code, sms_content, status, rented_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (user_id, request_id, phone, service, OTP_PRICE, code, sms_content, 1, datetime.now(VIETNAM_TZ).isoformat()))
+                    conn.commit()
+                    conn.close()
+                    
+                    # Gửi thông báo cho admin
+                    for admin_id in ADMIN_IDS:
+                        await bot.send_message(
+                            admin_id,
+                            f"🔐 <b>CÓ OTP MỚI</b>\n\n"
+                            f"👤 User: {user_id}\n"
+                            f"🎮 DV: {service}\n"
+                            f"📱 Số: {phone}\n"
+                            f"🔑 Mã: {code}\n"
+                            f"🎵 Audio: {is_sound}\n"
+                            f"💰 Lợi nhuận: 1,220đ"
+                        )
+                    
+                    # Xử lý OTP dạng audio
+                    if is_sound:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(sms_content, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                                    if resp.status == 200:
+                                        audio_data = await resp.read()
+                                        
+                                        await bot.send_voice(
+                                            user_id,
+                                            voice=types.BufferedInputFile(audio_data, filename="otp.wav"),
+                                            caption=f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                                    f"💰 <b>Giá thuê mới:</b> {OTP_PRICE:,}đ\n"
+                                                    f"♻️ <b>Giá thuê lại:</b> 3,550đ\n"
+                                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                                [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,550đ)", callback_data=f"otp_rent_again_{request_id}_{re_phone}_{service}")],
+                                                [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                            ])
+                                        )
+                                    else:
+                                        raise Exception("Failed to download audio")
+                        except Exception as e:
+                            # Fallback: gửi link nếu tải lỗi
+                            await bot.send_message(
+                                user_id,
+                                f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                f"🎵 <b>Audio OTP:</b> <a href='{sms_content}'>Nhấn để nghe</a>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"💰 <b>Giá thuê mới:</b> {OTP_PRICE:,}đ\n"
+                                f"♻️ <b>Giá thuê lại:</b> 3,550đ\n"
+                                f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,550đ)", callback_data=f"otp_rent_again_{request_id}_{re_phone}_{service}")],
+                                    [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                    [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                ])
+                            )
+                    else:
+                        # OTP dạng text
+                        await bot.send_message(
+                            user_id,
+                            f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                            f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                            f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                            f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                            f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💰 <b>Giá thuê mới:</b> {OTP_PRICE:,}đ\n"
+                            f"♻️ <b>Giá thuê lại:</b> 3,550đ\n"
+                            f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                            f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,550đ)", callback_data=f"otp_rent_again_{request_id}_{re_phone}_{service}")],
+                                [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                            ])
+                        )
+                    
+                    # Xóa session khỏi danh sách
+                    if user_id in otp_sessions:
+                        otp_sessions[user_id] = [s for s in otp_sessions[user_id] if s['id'] != session_id]
+                        if not otp_sessions[user_id]:
+                            del otp_sessions[user_id]
+                    return
+        except Exception as e:
+            print(f"Lỗi check OTP: {e}")
+        
+        await asyncio.sleep(2)
+@dp.callback_query(F.data.startswith("otp_rent_again_"))
+async def otp_rent_again_handler(call: CallbackQuery):
+    """Xử lý thuê lại số cũ với giá 3,550đ"""
+    data_parts = call.data.split("_")
+    # otp_rent_again_request_id_phone_service
+    request_id = data_parts[3]
+    phone = data_parts[4]
+    service = data_parts[5]
+    
+    user = get_user(call.from_user.id)
+    balance = user[3] if isinstance(user[3], int) else 0
+    rent_again_price = 3550
+    
+    if balance < rent_again_price:
+        await call.answer(f"❌ Số dư không đủ! Cần {rent_again_price:,}đ. Bạn có {balance:,}đ", show_alert=True)
+        return
+    
+    # Lấy service ID của Okeda
+    service_id = await get_okeda_service_id()
+    if not service_id:
+        await call.answer("❌ Không tìm thấy dịch vụ OKEDA!", show_alert=True)
+        return
+    
+    # Gọi API thuê lại số cũ
+    result = await call_viotp_api("request/getv2", {"serviceId": service_id, "number": phone})
+    
+    if not result.get('success'):
+        error_msg = result.get('message', 'Lỗi không xác định')
+        await call.answer(f"❌ Lỗi thuê lại: {error_msg}", show_alert=True)
+        return
+    
+    data = result.get('data', {})
+    new_request_id = data.get('request_id')
+    new_phone = data.get('phone_number', phone)
+    
+    if not new_request_id:
+        await call.answer("❌ Không thể thuê lại số này!", show_alert=True)
+        return
+    
+    # Trừ tiền
+    update_balance(call.from_user.id, -rent_again_price, f"Thuê lại OTP {service} - số {phone}")
+    new_balance = balance - rent_again_price
+    
+    # Tạo session mới cho thuê lại
+    session_id = f"{service}_rentagain_{new_request_id}_{int(datetime.now().timestamp())}"
+    session = {
+        'id': session_id,
+        'service': service,
+        'request_id': new_request_id,
+        'phone': new_phone,
+        'start_time': datetime.now(VIETNAM_TZ)
+    }
+    
+    if call.from_user.id not in otp_sessions:
+        otp_sessions[call.from_user.id] = []
+    otp_sessions[call.from_user.id].append(session)
+    
+    current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
+    active_count = len(otp_sessions[call.from_user.id])
+    
+    await call.message.edit_text(
+        f"✅ <b>THUÊ LẠI SỐ THÀNH CÔNG!</b>\n\n"
+        f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+        f"📱 <b>Số điện thoại:</b> <code>{new_phone}</code>\n"
+        f"♻️ <b>Thuê lại</b> (đã từng thuê trước đó)\n"
+        f"⏰ <b>Thời gian:</b> {current_time}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Giá:</b> {rent_again_price:,}đ\n"
+        f"💵 <b>Số dư còn:</b> {new_balance:,}đ\n"
+        f"📊 <b>Đang thuê:</b> {active_count} số\n\n"
+        f"⏳ <b>Đang chờ OTP...</b> (tối đa 6 phút)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔐 Thuê tiếp số khác", callback_data="otp_menu")],
+            [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+        ])
+    )
+    
+    # Chạy vòng lặp check OTP cho thuê lại
+    asyncio.create_task(check_otp_loop(call.from_user.id, session_id, new_request_id, service, new_phone))
 # ==================== THÔNG TIN USER ====================
 @dp.callback_query(F.data == "myinfo")
 async def show_my_info(call: CallbackQuery):
@@ -694,6 +1360,63 @@ async def back_menu(call: CallbackQuery):
         f"🎉 <b>MENU CHÍNH</b>\n\n💰 Số dư: {balance:,}đ\n\n👇 Chọn chức năng:",
         reply_markup=main_menu(balance)
     )
+@dp.callback_query(F.data == "otp_history")
+async def otp_history_handler(call: CallbackQuery):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT phone_number, service_name, price, code, status, rented_at 
+        FROM otp_rentals 
+        WHERE user_id = %s 
+        ORDER BY id DESC 
+        LIMIT 20
+    """, (call.from_user.id,))
+    rentals = c.fetchall()
+    conn.close()
+    
+    if not rentals:
+        await call.message.edit_text(
+            "📭 Bạn chưa thuê OTP lần nào!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔐 Thuê OTP", callback_data="otp_menu")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+            ])
+        )
+        return
+    
+    total = len(rentals)
+    text = f"📜 <b>LỊCH SỬ THUÊ OTP</b> <i>({total}/20 số mới nhất)</i>\n\n"
+    
+    for i, r in enumerate(rentals, 1):
+        if r[4] == 1:
+            status_text = "✅ Thành công"
+            status_icon = "✅"
+        else:
+            status_text = "⏳ Hết hạn/Hoàn tiền"
+            status_icon = "❌"
+        
+        # Định dạng thời gian
+        try:
+            rented_time = r[5][:19].replace('T', ' ')
+        except:
+            rented_time = r[5][:19] if r[5] else "Không rõ"
+        
+        text += f"""
+{status_icon} <b>#{i}</b>
+📱 Số: <code>{r[0]}</code>
+🎮 DV: {r[1]}
+💰 Giá: {r[2]:,}đ
+🔑 Mã: <code>{r[3] or 'Chưa có'}</code>
+📅 {rented_time}
+"""
+    
+    # Thêm nút xem thêm nếu cần
+    buttons = [[InlineKeyboardButton(text="🔐 Thuê OTP mới", callback_data="otp_menu")]]
+    if total == 20:
+        buttons.append([InlineKeyboardButton(text="📜 Xem thêm (liên hệ Admin)", callback_data="support")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 # ==================== ADMIN ====================
 # ==================== CHAT ALL ====================
@@ -777,6 +1500,14 @@ async def admin_dash(call: CallbackQuery):
     total_sold = sum(sold.values())
     total_inv = sum(inv.values())
     
+    # Tính doanh thu OTP (lợi nhuận = 2820 - 1600 = 1220đ mỗi lần)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM otp_rentals WHERE status = 1")
+    otp_success = c.fetchone()[0]
+    otp_profit = otp_success * 1220
+    conn.close()
+    
     text = f"""
 📊 <b>DASHBOARD TỔNG QUAN</b>
 
@@ -784,10 +1515,14 @@ async def admin_dash(call: CallbackQuery):
 • Tổng users: {user_count}
 • Users mới hôm nay: {daily['new_users']}
 
-💰 <b>Thống kê doanh thu:</b>
+💰 <b>Thống kê doanh thu acc:</b>
 • Hôm nay: {daily['revenue']:,}đ ({daily['sales']} giao dịch)
-• Tổng doanh thu: {total_revenue:,}đ
+• Tổng doanh thu acc: {total_revenue:,}đ
 • Tổng acc đã bán: {total_sold}
+
+🔐 <b>Thống kê OTP:</b>
+• Số lần thuê thành công: {otp_success}
+• Lợi nhuận OTP: {otp_profit:,}đ
 
 📦 <b>Tồn kho:</b>
 • Tổng acc còn: {total_inv}
@@ -1207,8 +1942,15 @@ async def user_info(msg: Message, state: FSMContext):
     c.execute("SELECT trans_id, amount, note, created_at FROM recharge_history WHERE user_id = %s ORDER BY id DESC LIMIT 5", (user_id,))
     recharges = c.fetchall()
     
-    # Lấy 5 lần mua gần nhất
-    c.execute("SELECT site, amount, purchased_at FROM purchases WHERE user_id = %s ORDER BY id DESC LIMIT 5", (user_id,))
+    # Lấy 10 lần mua gần nhất
+    c.execute("""
+        SELECT p.site, a.username, a.password, a.withdraw_password, a.real_name, a.bank_number, a.phone, p.amount, p.purchased_at 
+        FROM purchases p 
+        JOIN accounts a ON p.account_id = a.id 
+        WHERE p.user_id = %s 
+        ORDER BY p.purchased_at DESC 
+        LIMIT 10
+    """, (user_id,))
     purchases = c.fetchall()
     
     # Format thời gian
@@ -1238,12 +1980,21 @@ async def user_info(msg: Message, state: FSMContext):
     else:
         text += "\n📭 Chưa có lịch sử nạp"
     
-    text += "\n\n━━━━━━━━━━━━━━━━━━━━━━━\n🎮 <b>5 LẦN MUA GẦN NHẤT:</b>"
+    text += f"\n\n━━━━━━━━━━━━━━━━━━━━━━━\n🎮 <b>10 ACC ĐÃ MUA GẦN NHẤT:</b>\n"
     
     if purchases:
-        for p in purchases:
-            time_str = p[2].replace('T', ' ')[:19] if p[2] else 'Không rõ'
-            text += f"\n🎮 {p[0]} | 💰 {p[1]:,}đ | 📅 {time_str}"
+        for i, p in enumerate(purchases, 1):
+            time_str = p[8].replace('T', ' ')[:19] if p[8] else 'Không rõ'
+            text += f"""
+🔹 <b>#{i}</b>
+   🎮 {SITE_EMOJI.get(p[0], '🎮')} {p[0]}
+   👤 <code>{p[1]}:{p[2]}</code>
+   🔐 MK Rút: {p[3] or 'Chưa có'}
+   📝 Tên thật: {p[4] or 'Chưa có'}
+   🏦 STK: {p[5] or 'Chưa có'}
+   📱 SĐT: {p[6] or 'Chưa có'}
+   💰 {p[7]:,}đ | 📅 {time_str}
+"""
     else:
         text += "\n📭 Chưa có lịch sử mua"
     
@@ -1301,15 +2052,20 @@ async def admin_show_user_info(msg: Message, state: FSMContext):
         conn.close()
         return
     
-    # Lấy danh sách acc đã mua
+    # Lấy danh sách acc đã mua - GIỚI HẠN 15 ACC GẦN NHẤT
     c.execute("""
         SELECT p.site, a.username, a.password, a.withdraw_password, a.real_name, a.bank_number, a.phone, p.amount, p.purchased_at 
         FROM purchases p 
         JOIN accounts a ON p.account_id = a.id 
         WHERE p.user_id = %s 
         ORDER BY p.purchased_at DESC
+        LIMIT 15
     """, (user[0],))
     purchases = c.fetchall()
+    
+    # Lấy tổng số acc để hiển thị
+    c.execute("SELECT COUNT(*) FROM purchases WHERE user_id = %s", (user[0],))
+    total_purchases = c.fetchone()[0]
     conn.close()
     
     # Format thời gian
@@ -1325,11 +2081,11 @@ async def admin_show_user_info(msg: Message, state: FSMContext):
 💰 <b>Số dư:</b> {user[3]:,}đ
 📥 <b>Tổng nạp:</b> {user[4]:,}đ
 📤 <b>Tổng chi:</b> {user[5]:,}đ
-📦 <b>Số acc đã mua:</b> {len(purchases)}
+📦 <b>Số acc đã mua:</b> {total_purchases}
 📅 <b>Ngày tham gia:</b> {created_time}
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-🎮 <b>DANH SÁCH ACC ĐÃ MUA:</b>
+🎮 <b>DANH SÁCH ACC ĐÃ MUA (15 mới nhất):</b>
 """
     
     if purchases:
@@ -1344,6 +2100,9 @@ async def admin_show_user_info(msg: Message, state: FSMContext):
             text += f"   💰 Giá: {p[7]:,}đ | 📅 {time_str}\n"
     else:
         text += "\n📭 Chưa mua account nào"
+    
+    if total_purchases > 15:
+        text += f"\n... và {total_purchases - 15} acc khác"
     
     # Thêm nút hành động
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1432,6 +2191,8 @@ def run_webhook():
 
 # Sửa lại hàm main
 async def main():
+    fix_ref_code()
+    migrate_db()
     init_db()
     logger.info("🚀 Bot đang chạy...")
     
