@@ -200,28 +200,33 @@ def update_balance(telegram_id: int, amount: int, note: str = ""):
     if amount > 0:
         c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
         
-        # Tính hoa hồng 5% cho người giới thiệu
-        c.execute("SELECT ref_by FROM users WHERE telegram_id = %s", (telegram_id,))
-        ref_by = c.fetchone()
+        # KIỂM TRA CÓ PHẢI HOÀN TIỀN KHÔNG
+        is_refund = "hoàn tiền" in note.lower() or "hết 6 phút" in note.lower()
         
-        if ref_by and ref_by[0]:
-            commission = int(amount * 0.05)
-            if commission > 0:
-                add_ref_commission(telegram_id, ref_by[0], commission, f"Hoa hồng 5% từ nạp {amount:,}đ của user {telegram_id}")
-                
-                try:
-                    import asyncio
-                    asyncio.create_task(bot.send_message(
-                        ref_by[0],
-                        f"💰 <b>NHẬN HOA HỒNG GIỚI THIỆU</b>\n\n"
-                        f"👤 User bạn giới thiệu: <code>{telegram_id}</code>\n"
-                        f"💵 Nạp: {amount:,}đ\n"
-                        f"🎁 Hoa hồng 5%: <b>{commission:,}đ</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💡 Tiền đã được cộng vào số dư của bạn!"
-                    ))
-                except:
-                    pass
+        # CHỈ TÍNH HOA HỒNG KHI KHÔNG PHẢI HOÀN TIỀN
+        if not is_refund:
+            # Tính hoa hồng 5% cho người giới thiệu
+            c.execute("SELECT ref_by FROM users WHERE telegram_id = %s", (telegram_id,))
+            ref_by = c.fetchone()
+            
+            if ref_by and ref_by[0]:
+                commission = int(amount * 0.05)
+                if commission > 0:
+                    add_ref_commission(telegram_id, ref_by[0], commission, f"Hoa hồng 5% từ nạp {amount:,}đ của user {telegram_id}")
+                    
+                    try:
+                        import asyncio
+                        asyncio.create_task(bot.send_message(
+                            ref_by[0],
+                            f"💰 <b>NHẬN HOA HỒNG GIỚI THIỆU</b>\n\n"
+                            f"👤 User bạn giới thiệu: <code>{telegram_id}</code>\n"
+                            f"💵 Nạp: {amount:,}đ\n"
+                            f"🎁 Hoa hồng 5%: <b>{commission:,}đ</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💡 Tiền đã được cộng vào số dư của bạn!"
+                        ))
+                    except:
+                        pass
     else:
         c.execute("UPDATE users SET total_spent = total_spent + %s WHERE telegram_id = %s", (-amount, telegram_id))
     
