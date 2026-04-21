@@ -492,30 +492,375 @@ class RechargeState(StatesGroup):
     waiting_for_amount = State()
     waiting_for_bill = State()
 
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+
 def main_menu(user_balance: int = 0):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 MUA ACC", callback_data="buy"), InlineKeyboardButton(text="🔐 THUÊ OTP", callback_data="otp_menu")],
-        [InlineKeyboardButton(text="💰 SỐ DƯ", callback_data="balance")],
-        [InlineKeyboardButton(text="📜 LỊCH SỬ", callback_data="history")],
-        [InlineKeyboardButton(text="💳 NẠP TIỀN", callback_data="recharge")],
-        [InlineKeyboardButton(text="👥 GIỚI THIỆU", callback_data="ref_info")],
-        [InlineKeyboardButton(text="👤 THÔNG TIN USER", callback_data="myinfo")],
-        [InlineKeyboardButton(text="🆘 HỖ TRỢ", callback_data="support")]
-    ])
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            # Dịch vụ chính
+            [KeyboardButton(text="🛒 MUA ACC"), KeyboardButton(text="🔐 THUÊ OTP")],
+            # Tiện ích
+            [KeyboardButton(text="💰 SỐ DƯ"), KeyboardButton(text="📜 LỊCH SỬ"), KeyboardButton(text="💳 NẠP TIỀN")],
+            # Khác
+            [KeyboardButton(text="👥 GIỚI THIỆU"), KeyboardButton(text="👤 THÔNG TIN"), KeyboardButton(text="🆘 HỖ TRỢ")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="🔽 Chọn chức năng"
+    )
 
 def admin_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 DASHBOARD", callback_data="admin_dashboard")],
-        [InlineKeyboardButton(text="➕ THÊM ACC", callback_data="admin_add")],
-        [InlineKeyboardButton(text="📦 NHẬP NHIỀU", callback_data="admin_bulk_add")],
-        [InlineKeyboardButton(text="🔍 TRA CỨU USER", callback_data="admin_search_user")],
-        [InlineKeyboardButton(text="💰 CỘNG TIỀN", callback_data="admin_add_money")],
-        [InlineKeyboardButton(text="💸 TRỪ TIỀN", callback_data="admin_sub_money")],
-        [InlineKeyboardButton(text="👥 DANH SÁCH USER", callback_data="admin_users")],
-        [InlineKeyboardButton(text="📦 KHO ACC", callback_data="admin_inventory")],
-        [InlineKeyboardButton(text="💰 DOANH THU", callback_data="admin_revenue")],
-        [InlineKeyboardButton(text="⚙️ CÀI GIÁ", callback_data="admin_price")]
-    ])
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 DASHBOARD"), KeyboardButton(text="➕ THÊM ACC")],
+            [KeyboardButton(text="📦 NHẬP NHIỀU"), KeyboardButton(text="🔍 TRA CỨU USER")],
+            [KeyboardButton(text="💰 CỘNG TIỀN"), KeyboardButton(text="💸 TRỪ TIỀN")],
+            [KeyboardButton(text="👥 DANH SÁCH USER"), KeyboardButton(text="📦 KHO ACC")],
+            [KeyboardButton(text="💰 DOANH THU"), KeyboardButton(text="⚙️ CÀI GIÁ")],
+            [KeyboardButton(text="🔙 QUAY LẠI MENU CHÍNH")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Chọn chức năng admin..."
+    )
+# ==================== XỬ LÝ MENU CHÍNH (REPLY KEYBOARD) ====================
+
+@dp.message(F.text == "🛒 MUA ACC")
+async def handle_buy(msg: Message):
+    user = get_user(msg.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    
+    inv = get_inventory()
+    text = "🛒 <b>CHỌN SITE MUA ACC</b>\n\n"
+    for site in SITES:
+        price = SITE_PRICE.get(site, 20000)
+        text += f"{SITE_EMOJI[site]} {site}: {price:,}đ/acc | ✅ {inv.get(site, 0)} còn\n"
+    
+    buttons = []
+    for site in SITES:
+        count = inv.get(site, 0)
+        status = "✅" if count > 0 else "❌"
+        buttons.append([InlineKeyboardButton(text=f"{SITE_EMOJI[site]} {site} {status} ({count})", callback_data=f"buy_{site}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    
+    await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.message(F.text == "🔐 THUÊ OTP")
+async def handle_otp(msg: Message):
+    # Đếm số OTP đang chờ từ database
+    conn = get_db_connection()
+    c = conn.cursor()
+    time_limit = (datetime.now(VIETNAM_TZ) - timedelta(minutes=6)).isoformat()
+    c.execute("""
+        SELECT COUNT(*) FROM otp_rentals 
+        WHERE user_id = %s AND status = 0 AND rented_at > %s
+    """, (msg.from_user.id, time_limit))
+    active_count = c.fetchone()[0]
+    conn.close()
+    
+    text = f"""
+🔐 <b>THUÊ OTP</b>
+
+💰 <b>Giá mỗi số:</b> {OTP_PRICE:,}đ
+📱 <b>Đang thuê:</b> {active_count} số
+
+📋 <b>Chọn dịch vụ:</b>
+"""
+    await msg.answer(text, reply_markup=otp_service_menu())
+
+@dp.message(F.text == "💰 SỐ DƯ")
+async def handle_balance(msg: Message):
+    user = get_user(msg.from_user.id)
+    bal = user[3] if user and isinstance(user[3], int) else 0
+    total_recharge = user[4] if user and isinstance(user[4], int) else 0
+    total_spent = user[5] if user and isinstance(user[5], int) else 0
+    
+    text = f"""
+💰 <b>SỐ DƯ CỦA BẠN</b>
+
+💵 <b>Số dư:</b> {bal:,} VND
+📥 <b>Tổng nạp:</b> {total_recharge:,} VND
+📤 <b>Tổng chi:</b> {total_spent:,} VND
+"""
+    await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+    ]))
+
+@dp.message(F.text == "📜 LỊCH SỬ")
+async def handle_history(msg: Message):
+    history = get_user_history(msg.from_user.id, limit=10)
+    if not history:
+        await msg.answer("📭 Bạn chưa mua acc nào!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Mua ngay", callback_data="buy")],
+            [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+        ]))
+        return
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM purchases WHERE user_id = %s", (msg.from_user.id,))
+    total_purchases = c.fetchone()[0]
+    conn.close()
+    
+    text = f"📜 <b>LỊCH SỬ MUA HÀNG</b> <i>({len(history)}/{total_purchases} acc mới nhất)</i>\n\n"
+    
+    for i, h in enumerate(history, 1):
+        try:
+            dt = datetime.fromisoformat(h['date'].replace('T', ' '))
+            formatted_date = dt.strftime('%H:%M:%S %d/%m/%Y')
+        except:
+            formatted_date = h['date']
+        
+        text += f"""🔹 <b>#{i}</b>
+🎮 <b>Site:</b> {SITE_EMOJI[h['site']]} {h['site']}
+👤 <b>Username:</b> <code>{h['username']}</code>
+🔑 <b>Password:</b> <code>{h['password']}</code>
+🔐 <b>MK Rút:</b> <code>{h.get('withdraw_password', 'Chưa có')}</code>
+📝 <b>Tên thật:</b> {h.get('real_name', 'Chưa có')}
+🏦 <b>STK:</b> {h.get('bank_number', 'Chưa có')}
+📱 <b>SĐT:</b> {h.get('phone', 'Chưa có')}
+💰 <b>Giá:</b> {h['amount']:,}đ
+📅 <b>Ngày mua:</b> {formatted_date}
+
+"""
+    
+    if total_purchases > 10:
+        text += f"\n... và {total_purchases - 10} acc khác."
+    
+    await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Mua tiếp", callback_data="buy")],
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+    ]))
+
+@dp.message(F.text == "💳 NẠP TIỀN")
+async def handle_recharge(msg: Message, state: FSMContext):
+    user = get_user(msg.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    
+    await msg.answer(
+        f"💳 <b>NẠP TIỀN VÀO TÀI KHOẢN</b>\n\n"
+        f"💰 <b>Số dư hiện tại:</b> {balance:,}đ\n\n"
+        f"📝 <b>Nhập số tiền muốn nạp:</b>\n"
+        f"(Tối thiểu 20,000đ)\n\n"
+        f"Gửi /cancel để hủy",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+        ])
+    )
+    await state.set_state(RechargeState.waiting_for_amount)
+
+@dp.message(F.text == "👥 GIỚI THIỆU")
+async def handle_ref(msg: Message):
+    user = get_user(msg.from_user.id)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users WHERE ref_by = %s", (msg.from_user.id,))
+    ref_count = c.fetchone()[0]
+    c.execute("SELECT total_ref_commission, ref_code FROM users WHERE telegram_id = %s", (msg.from_user.id,))
+    row = c.fetchone()
+    total_commission = row[0] if row[0] else 0
+    ref_code = row[1]
+    conn.close()
+    
+    bot_username = (await bot.get_me()).username
+    
+    if not ref_code or ref_code == "None":
+        ref_code = generate_ref_code(msg.from_user.id)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("UPDATE users SET ref_code = %s WHERE telegram_id = %s", (ref_code, msg.from_user.id))
+        conn.commit()
+        conn.close()
+    
+    text = f"""
+👥 <b>GIỚI THIỆU BẠN BÈ</b>
+
+🔗 <b>Link giới thiệu:</b>
+<code>https://t.me/{bot_username}?start={ref_code}</code>
+
+📋 <b>Mã giới thiệu:</b>
+<code>{ref_code}</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>Thống kê của bạn:</b>
+• Số người đã giới thiệu: {ref_count}
+• Tổng hoa hồng nhận được: {total_commission:,}đ
+
+💰 <b>Hoa hồng:</b> 5% mỗi lần người được giới thiệu nạp tiền
+
+💡 <b>Hướng dẫn:</b>
+1. Gửi link trên cho bạn bè
+2. Bạn bè đăng ký qua link của bạn
+3. Bạn nhận 5% hoa hồng từ mỗi lần họ nạp tiền
+"""
+    await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+    ]))
+
+@dp.message(F.text == "👤 THÔNG TIN")
+async def handle_myinfo(msg: Message):
+    user = get_user(msg.from_user.id)
+    if not user:
+        await msg.answer("❌ Không tìm thấy thông tin!")
+        return
+    
+    balance = user[3] if isinstance(user[3], int) else 0
+    total_recharge = user[4] if isinstance(user[4], int) else 0
+    total_spent = user[5] if isinstance(user[5], int) else 0
+    
+    if user[6]:
+        try:
+            dt = datetime.fromisoformat(user[6].replace('T', ' '))
+            created_at = dt.strftime('%H:%M:%S %d/%m/%Y')
+        except:
+            created_at = user[6][:19].replace('T', ' ')
+    else:
+        created_at = "Không rõ"
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM purchases WHERE user_id = %s", (msg.from_user.id,))
+    purchase_count = c.fetchone()[0]
+    conn.close()
+    
+    text = f"""
+👤 <b>THÔNG TIN CỦA BẠN</b>
+
+🆔 <b>User ID:</b> <code>{msg.from_user.id}</code>
+📝 <b>Tên:</b> {msg.from_user.full_name}
+💬 <b>Username:</b> @{msg.from_user.username or 'chưa có'}
+
+━━━━━━━━━━━━━━━━━━━━━━━
+💰 <b>Số dư:</b> {balance:,}đ
+📥 <b>Tổng nạp:</b> {total_recharge:,}đ
+📤 <b>Tổng chi:</b> {total_spent:,}đ
+📦 <b>Số lần mua:</b> {purchase_count}
+
+📅 <b>Ngày tham gia:</b> {created_at}
+"""
+    
+    await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+    ]))
+
+@dp.message(F.text == "🆘 HỖ TRỢ")
+async def handle_support(msg: Message):
+    buttons = []
+    for username in ADMIN_USERNAMES:
+        buttons.append([InlineKeyboardButton(text=f"📩 @{username}", url=f"https://t.me/{username}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    
+    support_text = f"""
+🆘 <b>HỖ TRỢ KHÁCH HÀNG</b>
+
+📌 <b>Các vấn đề cần hỗ trợ:</b>
+• 🎮 Lỗi đăng nhập account
+• 💳 Nạp tiền chưa nhận được
+• 🔐 Quên mật khẩu rút tiền
+• 📝 Khiếu nại, thắc mắc khác
+
+━━━━━━━━━━━━━━━━━━━━
+
+<b>📞 Liên hệ admin:</b>
+Bấm vào tên admin bên dưới để chat trực tiếp!
+
+⏳ <b>Thời gian phản hồi:</b> 8h - 22h hàng ngày
+
+💡 <b>Lưu ý:</b> Ghi rõ vấn đề và kèm ảnh/video nếu có
+"""
+    await msg.answer(support_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.message(F.text == "🔙 QUAY LẠI MENU CHÍNH")
+async def handle_back_to_main(msg: Message):
+    user = get_user(msg.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    await msg.answer("🏠 <b>MENU CHÍNH</b>\n\n👇 Chọn chức năng:", reply_markup=main_menu(balance))
+# ==================== XỬ LÝ MENU ADMIN (REPLY KEYBOARD) ====================
+
+@dp.message(F.text == "📊 DASHBOARD")
+async def handle_admin_dashboard(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_dashboard", message=msg)
+    await admin_dash(fake_call)
+
+@dp.message(F.text == "➕ THÊM ACC")
+async def handle_admin_add(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_add", message=msg)
+    await admin_add_menu(fake_call, state)
+
+@dp.message(F.text == "📦 NHẬP NHIỀU")
+async def handle_admin_bulk(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_bulk_add", message=msg)
+    await admin_bulk_add(fake_call, state)
+
+@dp.message(F.text == "🔍 TRA CỨU USER")
+async def handle_admin_search(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_search_user", message=msg)
+    await admin_search_user(fake_call, state)
+
+@dp.message(F.text == "💰 CỘNG TIỀN")
+async def handle_admin_add_money(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_add_money", message=msg)
+    await admin_add_money(fake_call, state)
+
+@dp.message(F.text == "💸 TRỪ TIỀN")
+async def handle_admin_sub_money(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_sub_money", message=msg)
+    await admin_sub_money(fake_call, state)
+
+@dp.message(F.text == "👥 DANH SÁCH USER")
+async def handle_admin_users(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_users", message=msg)
+    await admin_users(fake_call)
+
+@dp.message(F.text == "📦 KHO ACC")
+async def handle_admin_inventory(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_inventory", message=msg)
+    await admin_inventory(fake_call)
+
+@dp.message(F.text == "💰 DOANH THU")
+async def handle_admin_revenue(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_revenue", message=msg)
+    await admin_revenue(fake_call)
+
+@dp.message(F.text == "⚙️ CÀI GIÁ")
+async def handle_admin_price(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    fake_call = types.CallbackQuery(id="1", from_user=msg.from_user, chat_instance="1", data="admin_price", message=msg)
+    await admin_price_menu(fake_call, state)
+
+@dp.message(F.text == "🔙 QUAY LẠI MENU CHÍNH")
+async def handle_admin_back_to_main(msg: Message):
+    user = get_user(msg.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    await msg.answer("🏠 <b>MENU CHÍNH</b>\n\n👇 Chọn chức năng:", reply_markup=main_menu(balance))
 @dp.callback_query(F.data == "ref_info")
 async def ref_info_callback(call: CallbackQuery):
     user = get_user(call.from_user.id)
@@ -630,9 +975,13 @@ async def show_balance(call: CallbackQuery):
 📥 <b>Tổng nạp:</b> {total_recharge:,} VND
 📤 <b>Tổng chi:</b> {total_spent:,} VND
 """
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 @dp.callback_query(F.data == "buy")
 async def buy_menu(call: CallbackQuery):
@@ -649,7 +998,11 @@ async def buy_menu(call: CallbackQuery):
         buttons.append([InlineKeyboardButton(text=f"{SITE_EMOJI[site]} {site} {status} ({count})", callback_data=f"buy_{site}")])
     buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
     
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def process_buy(call: CallbackQuery):
@@ -720,16 +1073,23 @@ async def process_buy(call: CallbackQuery):
 
 @dp.callback_query(F.data == "history")
 async def show_history(call: CallbackQuery):
-    history = get_user_history(call.from_user.id, limit=15)
+    history = get_user_history(call.from_user.id, limit=10)
     if not history:
-        await call.message.edit_text("📭 Bạn chưa mua acc nào!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        await call.message.answer("📭 Bạn chưa mua acc nào!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛒 Mua ngay", callback_data="buy")],
             [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
         ]))
         return
-    text = "📜 <b>LỊCH SỬ MUA HÀNG</b> <i>(15 acc mới nhất)</i>\n\n"
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM purchases WHERE user_id = %s", (call.from_user.id,))
+    total_purchases = c.fetchone()[0]
+    conn.close()
+    
+    text = f"📜 <b>LỊCH SỬ MUA HÀNG</b> <i>({len(history)}/{total_purchases} acc mới nhất)</i>\n\n"
+    
     for i, h in enumerate(history, 1):
-        # Định dạng lại thời gian
         try:
             dt = datetime.fromisoformat(h['date'].replace('T', ' '))
             formatted_date = dt.strftime('%H:%M:%S %d/%m/%Y')
@@ -737,20 +1097,29 @@ async def show_history(call: CallbackQuery):
             formatted_date = h['date']
         
         text += f"""🔹 <b>#{i}</b>
-🎮 Site: {SITE_EMOJI[h['site']]} {h['site']}
-👤 Username: <code>{h['username']}</code>
-🔑 Password: <code>{h['password']}</code>
-🔐 MK Rút: <code>{h.get('withdraw_password', 'Chưa có')}</code>
-📝 Tên thật: {h.get('real_name', 'Chưa có')}
-🏦 STK: {h.get('bank_number', 'Chưa có')}
-📱 SĐT: {h.get('phone', 'Chưa có')}
-💰 Giá: {h['amount']:,}đ
-📅 Ngày mua: {formatted_date}
+🎮 <b>Site:</b> {SITE_EMOJI[h['site']]} {h['site']}
+👤 <b>Username:</b> <code>{h['username']}</code>
+🔑 <b>Password:</b> <code>{h['password']}</code>
+🔐 <b>MK Rút:</b> <code>{h.get('withdraw_password', 'Chưa có')}</code>
+📝 <b>Tên thật:</b> {h.get('real_name', 'Chưa có')}
+🏦 <b>STK:</b> {h.get('bank_number', 'Chưa có')}
+📱 <b>SĐT:</b> {h.get('phone', 'Chưa có')}
+💰 <b>Giá:</b> {h['amount']:,}đ
+📅 <b>Ngày mua:</b> {formatted_date}
 
 """
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    
+    if total_purchases > 10:
+        text += f"\n... và {total_purchases - 10} acc khác."
+    
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Mua tiếp", callback_data="buy")],
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 # ==================== THUÊ OTP (OKEDA - 5 SITE) ====================
 import asyncio
@@ -765,7 +1134,7 @@ OKVIP_API_URL = "https://api.viotp.com"
 OKEDA_SERVICE_ID = None
 
 # Giá thuê OTP
-OTP_PRICE = 2820
+OTP_PRICE = 2520
 
 # Danh sách 5 dịch vụ (chỉ để hiển thị, tất cả đều dùng OKEDA)
 OTP_SERVICES = ["CM88", "SC88", "FLY88", "F168", "C168"]
@@ -803,17 +1172,64 @@ async def get_okeda_service_id() -> int:
     return None
 
 def otp_service_menu():
-    """Menu chọn 5 dịch vụ OTP"""
+    """Menu chọn 5 dịch vụ OTP - xếp 2 nút/hàng"""
     buttons = []
-    for service in OTP_SERVICES:
-        buttons.append([InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[service]} {service}", callback_data=f"otp_buy_{service}")])
-    buttons.append([InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history")])
-    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    # Xếp các dịch vụ thành từng cặp
+    for i in range(0, len(OTP_SERVICES), 2):
+        row = []
+        row.append(InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[OTP_SERVICES[i]]} {OTP_SERVICES[i]}", callback_data=f"otp_buy_{OTP_SERVICES[i]}"))
+        if i + 1 < len(OTP_SERVICES):
+            row.append(InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[OTP_SERVICES[i+1]]} {OTP_SERVICES[i+1]}", callback_data=f"otp_buy_{OTP_SERVICES[i+1]}"))
+        buttons.append(row)
+    # Hàng cuối: 2 nút chức năng
+    buttons.append([InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history"), InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.callback_query(F.data == "otp_menu")
 async def otp_service_handler(call: CallbackQuery):
     """Hiển thị menu chọn 5 dịch vụ OTP"""
+    
+    # Kiểm tra và đồng bộ session từ database
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Lấy các OTP đang chờ (status = 0) và chưa quá 6 phút
+    time_limit = (datetime.now(VIETNAM_TZ) - timedelta(minutes=6)).isoformat()
+    c.execute("""
+        SELECT request_id, phone_number, service_name, rented_at 
+        FROM otp_rentals 
+        WHERE user_id = %s AND status = 0 AND rented_at > %s
+    """, (call.from_user.id, time_limit))
+    db_sessions = c.fetchall()
+    conn.close()
+    
+    # Đồng bộ với otp_sessions trong RAM
+    if call.from_user.id not in otp_sessions:
+        otp_sessions[call.from_user.id] = []
+    
+    # Xóa session cũ trong RAM không còn trong DB
+    current_session_ids = [s['request_id'] for s in otp_sessions.get(call.from_user.id, [])]
+    db_session_ids = [s[0] for s in db_sessions]
+    
+    for session_id in current_session_ids:
+        if session_id not in db_session_ids:
+            # Xóa session không còn trong DB
+            otp_sessions[call.from_user.id] = [s for s in otp_sessions[call.from_user.id] if s['request_id'] != session_id]
+    
+    # Thêm session từ DB vào RAM nếu chưa có
+    for db_s in db_sessions:
+        if db_s[0] not in current_session_ids:
+            otp_sessions[call.from_user.id].append({
+                'id': f"{db_s[2]}_{db_s[0]}_{int(datetime.now().timestamp())}",
+                'service': db_s[2],
+                'request_id': db_s[0],
+                'phone': db_s[1],
+                'start_time': datetime.fromisoformat(db_s[3])
+            })
+    
+    if not otp_sessions.get(call.from_user.id):
+        otp_sessions[call.from_user.id] = []
+    
     # Đếm số phiên đang thuê
     user_sessions = otp_sessions.get(call.from_user.id, [])
     active_count = len(user_sessions)
@@ -826,7 +1242,7 @@ async def otp_service_handler(call: CallbackQuery):
 
 📋 <b>Chọn dịch vụ:</b>
 """
-    await call.message.answer(text, reply_markup=otp_service_menu())  # ✅ Gọi hàm tạo menu
+    await call.message.answer(text, reply_markup=otp_service_menu())
 
 @dp.callback_query(F.data.startswith("otp_buy_"))
 async def otp_buy_handler(call: CallbackQuery):
@@ -975,7 +1391,7 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                             f"📱 Số: {phone}\n"
                             f"🔑 Mã: {code}\n"
                             f"🎵 Audio: {is_sound}\n"
-                            f"💰 Lợi nhuận: 1,220đ"
+                            f"💰 Lợi nhuận: 920đ"
                         )
                     
                     # Xử lý OTP dạng audio
@@ -1117,7 +1533,7 @@ async def otp_rent_again_handler(call: CallbackQuery):
     current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
     active_count = len(otp_sessions[call.from_user.id])
     
-    await call.message.edit_text(
+    await call.message.answer(  # ✅ Đổi thành answer
         f"✅ <b>THUÊ LẠI SỐ THÀNH CÔNG!</b>\n\n"
         f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
         f"📱 <b>Số điện thoại:</b> <code>{new_phone}</code>\n"
@@ -1133,6 +1549,12 @@ async def otp_rent_again_handler(call: CallbackQuery):
             [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
         ])
     )
+    
+    # Xóa tin nhắn cũ (tùy chọn)
+    try:
+        await call.message.delete()
+    except:
+        pass
     
     # Chạy vòng lặp check OTP cho thuê lại
     asyncio.create_task(check_otp_loop(call.from_user.id, session_id, new_request_id, service, new_phone))
@@ -1347,19 +1769,31 @@ async def show_inventory(call: CallbackQuery):
         text += f"   📦 Đã bán: {sold.get(site, 0)} acc\n"
         text += f"   💰 Doanh thu: {revenue.get(site, 0):,}đ\n"
         text += f"   💵 Giá: {SITE_PRICE.get(site, 20000):,}đ\n\n"
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Mua ngay", callback_data="buy")],
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 @dp.callback_query(F.data == "menu")
 async def back_menu(call: CallbackQuery):
     user = get_user(call.from_user.id)
     balance = user[3] if user and isinstance(user[3], int) else 0
-    await call.message.edit_text(
+    
+    # Gửi tin nhắn MỚI với ReplyKeyboardMarkup
+    await call.message.answer(
         f"🎉 <b>MENU CHÍNH</b>\n\n💰 Số dư: {balance:,}đ\n\n👇 Chọn chức năng:",
         reply_markup=main_menu(balance)
     )
+    
+    # Xóa tin nhắn cũ (tùy chọn)
+    try:
+        await call.message.delete()
+    except:
+        pass
 @dp.callback_query(F.data == "otp_history")
 async def otp_history_handler(call: CallbackQuery):
     conn = get_db_connection()
@@ -1416,7 +1850,11 @@ async def otp_history_handler(call: CallbackQuery):
         buttons.append([InlineKeyboardButton(text="📜 Xem thêm (liên hệ Admin)", callback_data="support")])
     buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
     
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 # ==================== ADMIN ====================
 # ==================== CHAT ALL ====================
@@ -1505,7 +1943,7 @@ async def admin_dash(call: CallbackQuery):
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM otp_rentals WHERE status = 1")
     otp_success = c.fetchone()[0]
-    otp_profit = otp_success * 1220
+    otp_profit = otp_success * 920
     conn.close()
     
     text = f"""
@@ -1532,7 +1970,11 @@ async def admin_dash(call: CallbackQuery):
     for site in SITES:
         text += f"\n{SITE_EMOJI[site]} {site}: 📦{sold.get(site,0)} bán | ✅{inv.get(site,0)} còn | 💰{revenue.get(site,0):,}đ"
     
-    await call.message.edit_text(text, reply_markup=admin_menu())
+    await call.message.answer(text, reply_markup=admin_menu())
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 @dp.callback_query(F.data == "admin_revenue")
 async def admin_revenue(call: CallbackQuery):
@@ -1548,7 +1990,11 @@ async def admin_revenue(call: CallbackQuery):
     for site in SITES:
         text += f"{SITE_EMOJI[site]} {site}: {revenue.get(site,0):,}đ ({sold.get(site,0)} acc)\n"
     
-    await call.message.edit_text(text, reply_markup=admin_menu())
+    await call.message.answer(text, reply_markup=admin_menu())
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 @dp.callback_query(F.data == "admin_add")
 async def admin_add_menu(call: CallbackQuery, state: FSMContext):
@@ -1557,7 +2003,7 @@ async def admin_add_menu(call: CallbackQuery, state: FSMContext):
         return
     buttons = [[InlineKeyboardButton(text=f"{SITE_EMOJI[s]} {s}", callback_data=f"addsite_{s}")] for s in SITES]
     buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="admin_dashboard")])
-    await call.message.edit_text("➕ <b>THÊM ACCOUNT</b>\n\nChọn site:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.answer("➕ <b>THÊM ACCOUNT</b>\n\nChọn site:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(AddAccountState.waiting_for_site)
 
 @dp.callback_query(F.data == "admin_bulk_add")
@@ -1567,7 +2013,7 @@ async def admin_bulk_add(call: CallbackQuery, state: FSMContext):
         return
     buttons = [[InlineKeyboardButton(text=f"{SITE_EMOJI[s]} {s}", callback_data=f"bulk_{s}")] for s in SITES]
     buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="admin_dashboard")])
-    await call.message.edit_text("📦 <b>NHẬP NHIỀU ACCOUNT</b>\n\nChọn site:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.answer("📦 <b>NHẬP NHIỀU ACCOUNT</b>\n\nChọn site:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(AddAccountState.waiting_for_site)
 
 @dp.callback_query(AddAccountState.waiting_for_site, F.data.startswith("addsite_"))
@@ -1696,7 +2142,7 @@ async def admin_add_money(call: CallbackQuery, state: FSMContext):
         await call.answer("Không có quyền!")
         return
     await state.update_data(action="add")
-    await call.message.edit_text("💰 <b>CỘNG TIỀN CHO USER</b>\n\nFormat: <code>user_id số_tiền</code>\nVí dụ: <code>5180190297 50000</code>\n\nGửi /cancel để hủy")
+    await call.message.answer("💰 <b>CỘNG TIỀN CHO USER</b>\n\nFormat: <code>user_id số_tiền</code>\nVí dụ: <code>5180190297 50000</code>\n\nGửi /cancel để hủy")
     await state.set_state(MoneyState.waiting_for_user)
 
 @dp.callback_query(F.data == "admin_sub_money")
@@ -1705,7 +2151,7 @@ async def admin_sub_money(call: CallbackQuery, state: FSMContext):
         await call.answer("Không có quyền!")
         return
     await state.update_data(action="sub")
-    await call.message.edit_text("💸 <b>TRỪ TIỀN CỦA USER</b>\n\nFormat: <code>user_id số_tiền</code>\nVí dụ: <code>5180190297 20000</code>\n\nGửi /cancel để hủy")
+    await call.message.answer("💸 <b>TRỪ TIỀN CỦA USER</b>\n\nFormat: <code>user_id số_tiền</code>\nVí dụ: <code>5180190297 20000</code>\n\nGửi /cancel để hủy")
     await state.set_state(MoneyState.waiting_for_user)
 
 @dp.message(MoneyState.waiting_for_user)
@@ -1769,18 +2215,49 @@ async def process_money(msg: Message, state: FSMContext):
     except Exception as e:
         await msg.answer(f"❌ Lỗi! Format: user_id số_tiền\nVí dụ: 5180190297 50000")
 
+# ==================== DANH SÁCH USER CÓ PHÂN TRANG ====================
+user_page_cache = {}  # Lưu trang hiện tại của từng admin
+
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         await call.answer("Không có quyền!")
         return
-    users = get_all_users(30)
-    text = "👥 <b>DANH SÁCH USER (Top 30 theo số dư)</b>\n\n"
-    for i, u in enumerate(users, 1):
+    await show_users_page(call, page=1)
+
+async def show_users_page(call: CallbackQuery, page: int):
+    """Hiển thị danh sách user theo trang"""
+    users_per_page = 20
+    offset = (page - 1) * users_per_page
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT telegram_id, username, full_name, balance, total_recharge, total_spent, created_at 
+        FROM users 
+        ORDER BY balance DESC 
+        LIMIT %s OFFSET %s
+    """, (users_per_page, offset))
+    users = c.fetchall()
+    
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    conn.close()
+    
+    if not users:
+        await call.message.answer("📭 Không có user nào!")
+        return
+    
+    total_pages = (total_users + users_per_page - 1) // users_per_page
+    
+    text = f"👥 <b>DANH SÁCH USER</b> <i>(Trang {page}/{total_pages} - Tổng {total_users} user)</i>\n"
+    text += f"📊 <i>Sắp xếp theo số dư giảm dần</i>\n\n"
+    
+    for i, u in enumerate(users, 1 + offset):
         balance = u[3] if isinstance(u[3], int) else 0
         total_recharge = u[4] if isinstance(u[4], int) else 0
+        total_spent = u[5] if isinstance(u[5], int) else 0
         
-        # Hiển thị tên
         if u[2] and u[2] != "None":
             display_name = u[2]
         elif u[1] and u[1] != "None":
@@ -1788,10 +2265,45 @@ async def admin_users(call: CallbackQuery):
         else:
             display_name = f"User {u[0]}"
         
-        text += f"{i}. 🆔 <code>{u[0]}</code>\n"
+        # Thêm icon theo số dư
+        if balance >= 100000:
+            balance_icon = "👑"
+        elif balance >= 50000:
+            balance_icon = "💎"
+        elif balance >= 10000:
+            balance_icon = "💰"
+        else:
+            balance_icon = "💵"
+        
+        text += f"{balance_icon} <b>#{i}</b> 🆔 <code>{u[0]}</code>\n"
         text += f"   👤 {display_name}\n"
-        text += f"   💰 {balance:,}đ | 📥 {total_recharge:,}đ\n\n"
-    await call.message.edit_text(text, reply_markup=admin_menu())
+        text += f"   💰 {balance:,}đ | 📥 {total_recharge:,}đ | 📤 {total_spent:,}đ\n\n"
+    
+    # Tạo nút phân trang
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ TRANG TRƯỚC", callback_data=f"users_page_{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="TRANG SAU ▶️", callback_data=f"users_page_{page+1}"))
+    
+    keyboard = []
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    keyboard.append([InlineKeyboardButton(text="🔙 QUAY LẠI ADMIN", callback_data="admin_dashboard")])
+    
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    try:
+        await call.message.delete()
+    except:
+        pass
+
+@dp.callback_query(F.data.startswith("users_page_"))
+async def users_page_callback(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        await call.answer("Không có quyền!")
+        return
+    page = int(call.data.split("_")[2])
+    await show_users_page(call, page)
 
 @dp.callback_query(F.data == "admin_inventory")
 async def admin_inventory(call: CallbackQuery):
@@ -1802,7 +2314,11 @@ async def admin_inventory(call: CallbackQuery):
     text = "📦 <b>KHO ACCOUNT (ADMIN)</b>\n\n"
     for site in SITES:
         text += f"{SITE_EMOJI[site]} {site}: {inv.get(site, 0)} acc\n"
-    await call.message.edit_text(text, reply_markup=admin_menu())
+    await call.message.answer(text, reply_markup=admin_menu())
+    try:
+        await call.message.delete()
+    except:
+        pass
 
 @dp.callback_query(F.data == "admin_price")
 async def admin_price_menu(call: CallbackQuery, state: FSMContext):
@@ -1811,7 +2327,7 @@ async def admin_price_menu(call: CallbackQuery, state: FSMContext):
         return
     buttons = [[InlineKeyboardButton(text=f"{SITE_EMOJI[s]} {s}", callback_data=f"price_{s}")] for s in SITES]
     buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="admin_dashboard")])
-    await call.message.edit_text("⚙️ <b>CÀI ĐẶT GIÁ THEO SITE</b>\n\nChọn site:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.answer("⚙️ <b>CÀI ĐẶT GIÁ THEO SITE</b>\n\nChọn site:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(PriceState.waiting_for_site)
 
 @dp.callback_query(PriceState.waiting_for_site, F.data.startswith("price_"))
@@ -1819,7 +2335,7 @@ async def admin_set_price(call: CallbackQuery, state: FSMContext):
     site = call.data.split("_")[1]
     await state.update_data(site=site)
     current_price = SITE_PRICE.get(site, 20000)
-    await call.message.edit_text(f"💰 Nhập giá mới cho {SITE_EMOJI[site]} {site}:\n\nGiá hiện tại: {current_price:,}đ\n\nGửi /cancel để hủy")
+    await call.message.answer(f"💰 Nhập giá mới cho {SITE_EMOJI[site]} {site}:\n\nGiá hiện tại: {current_price:,}đ\n\nGửi /cancel để hủy")
     await state.set_state(PriceState.waiting_for_price)
 
 @dp.message(PriceState.waiting_for_price)
@@ -2009,13 +2525,20 @@ async def admin_search_user(call: CallbackQuery, state: FSMContext):
         await call.answer("Không có quyền!", show_alert=True)
         return
     
-    await call.message.edit_text(
+    await call.message.answer(  # ✅ Đổi edit_text thành answer
         "🔍 <b>TRA CỨU THÔNG TIN USER</b>\n\n"
         "Nhập ID Telegram của user cần xem:\n"
         "Ví dụ: <code>5180190297</code>\n\n"
         "Hoặc nhập username: <code>@makkllai</code>\n\n"
         "Gửi /cancel để hủy"
     )
+    
+    # Xóa tin nhắn cũ để tránh rối
+    try:
+        await call.message.delete()
+    except:
+        pass
+    
     await state.set_state(SearchUserState.waiting_for_user_id)
 
 @dp.message(SearchUserState.waiting_for_user_id)
