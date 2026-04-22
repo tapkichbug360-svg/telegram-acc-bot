@@ -1134,7 +1134,12 @@ import json
 # Cấu hình OKVIP API
 OKVIP_TOKEN = "239e39474dfb4e72903ff527c2b26d46"
 OKVIP_API_URL = "https://api.viotp.com"
-
+# ==================== CẤU HÌNH HupSMS ====================
+HUPSMS_API_KEY = "hup_MHaWCuF_3vWeYQdrnhQP1I4UEScX6XoZSoGKZ-ZJ1OS-ZEVd"
+HUPSMS_API_URL = "https://hupsms.com/api/v1"
+HUPSMS_PRICE = 2680  # Giá thuê SMS VIP
+HUPSMS_SERVER = 3  # Server 3
+HUPSMS_SERVICE_NAME = "Test 3"  # Dịch vụ Test 3
 # Service ID của Okeda (tự động lấy từ API)
 OKEDA_SERVICE_ID = None
 
@@ -1144,6 +1149,10 @@ OTP_PRICE = 2520
 # Danh sách 5 dịch vụ (chỉ để hiển thị, tất cả đều dùng OKEDA)
 OTP_SERVICES = ["CM88", "SC88", "FLY88", "F168", "C168"]
 OTP_SERVICE_EMOJI = {"CM88": "🎰", "SC88": "🎲", "FLY88": "✈️", "F168": "🏆", "C168": "🃏"}
+
+# Dịch vụ SMS VIP (riêng)
+SMS_VIP_SERVICES = ["SMS VIP"]
+SMS_VIP_EMOJI = {"SMS VIP": "💎"}
 
 # Lưu trữ nhiều phiên thuê OTP (cho phép nhiều số cùng lúc)
 # Cấu trúc: {user_id: [session1, session2, ...]}
@@ -1177,15 +1186,19 @@ async def get_okeda_service_id() -> int:
     return None
 
 def otp_service_menu():
-    """Menu chọn 5 dịch vụ OTP - xếp 2 nút/hàng"""
+    """Menu chọn dịch vụ OTP và SMS VIP"""
     buttons = []
-    # Xếp các dịch vụ thành từng cặp
+    # Các dịch vụ OTP thường
     for i in range(0, len(OTP_SERVICES), 2):
         row = []
         row.append(InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[OTP_SERVICES[i]]} {OTP_SERVICES[i]}", callback_data=f"otp_buy_{OTP_SERVICES[i]}"))
         if i + 1 < len(OTP_SERVICES):
             row.append(InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[OTP_SERVICES[i+1]]} {OTP_SERVICES[i+1]}", callback_data=f"otp_buy_{OTP_SERVICES[i+1]}"))
         buttons.append(row)
+    
+    # Thêm dòng SMS VIP
+    buttons.append([InlineKeyboardButton(text=f"{SMS_VIP_EMOJI['SMS VIP']} SMS VIP (2680đ)", callback_data="sms_vip_buy")])
+    
     # Hàng cuối: 2 nút chức năng
     buttons.append([InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history"), InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1329,6 +1342,294 @@ async def otp_buy_handler(call: CallbackQuery):
     
     # Chạy vòng lặp check OTP riêng cho từng session
     asyncio.create_task(check_otp_loop(call.from_user.id, session_id, request_id, service, phone))
+
+@dp.callback_query(F.data == "sms_vip_buy")
+async def sms_vip_buy_handler(call: CallbackQuery):
+    """Xử lý thuê SMS VIP từ HupSMS"""
+    service = "SMS VIP"
+    
+    user = get_user(call.from_user.id)
+    balance = user[3] if isinstance(user[3], int) else 0
+    
+    if balance < HUPSMS_PRICE:
+        await call.answer(f"❌ Số dư không đủ! Cần {HUPSMS_PRICE:,}đ. Bạn có {balance:,}đ", show_alert=True)
+        return
+    
+    # Gọi API thuê SMS
+    result = await rent_hupsms_sms()
+    
+    if not result:
+        await call.answer("❌ Không thể thuê SMS VIP! Vui lòng thử lại sau.", show_alert=True)
+        return
+    
+    phone = format_phone_number(result.get('phone'))  # Bỏ số 0 đầu
+    order_id = result.get('orderId')
+    price = result.get('price', HUPSMS_PRICE)
+    
+    if not phone or not order_id:
+        await call.answer("❌ Không lấy được số điện thoại từ API!", show_alert=True)
+        return
+    
+    # Trừ tiền
+    update_balance(call.from_user.id, -HUPSMS_PRICE, f"Thuê SMS VIP - số {phone}")
+    new_balance = balance - HUPSMS_PRICE
+    
+    # Tạo session
+    session_id = f"SMSVIP_{order_id}_{int(datetime.now().timestamp())}"
+    session = {
+        'id': session_id,
+        'service': service,
+        'request_id': order_id,
+        'phone': phone,
+        'start_time': datetime.now(VIETNAM_TZ),
+        'api_type': 'hupsms'  # Đánh dấu là từ HupSMS
+    }
+    
+    if call.from_user.id not in otp_sessions:
+        otp_sessions[call.from_user.id] = []
+    otp_sessions[call.from_user.id].append(session)
+    
+    current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
+    active_count = len(otp_sessions[call.from_user.id])
+    
+    await call.message.answer(
+        f"✅ <b>THUÊ SMS VIP THÀNH CÔNG!</b>\n\n"
+        f"💎 <b>Dịch vụ:</b> SMS VIP\n"
+        f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+        f"⏰ <b>Thời gian:</b> {current_time}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Giá:</b> {HUPSMS_PRICE:,}đ\n"
+        f"💵 <b>Số dư còn:</b> {new_balance:,}đ\n"
+        f"📊 <b>Đang thuê:</b> {active_count} số\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ <b>Đang chờ SMS...</b> (tối đa 6 phút)\n"
+        f"🔄 Hệ thống tự động kiểm tra mỗi 2 giây\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Chính sách hoàn tiền:</b>\n"
+        f"• Nếu sau 6 phút không nhận được SMS\n"
+        f"• Hệ thống sẽ <b>TỰ ĐỘNG HOÀN TIỀN</b>\n"
+        f"• Số tiền {HUPSMS_PRICE:,}đ sẽ được cộng lại\n\n"
+        f"💡 Bạn có thể <b>thuê thêm số khác</b> ngay bây giờ!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔐 Thuê tiếp số khác", callback_data="otp_menu")],
+            [InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history")],
+            [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+        ])
+    )
+    
+    # Chạy vòng lặp check OTP cho HupSMS
+    asyncio.create_task(check_hupsms_loop(call.from_user.id, session_id, order_id, service, phone))
+async def check_hupsms_loop(user_id: int, session_id: str, order_id: str, service: str, phone: str):
+    """Vòng lặp check OTP từ HupSMS mỗi 2 giây, tự động hoàn tiền sau 6 phút"""
+    start_time = datetime.now(VIETNAM_TZ)
+    timeout_minutes = 6
+    
+    while True:
+        elapsed = (datetime.now(VIETNAM_TZ) - start_time).total_seconds() / 60
+        
+        # Hết 6 phút -> hoàn tiền
+        if elapsed >= timeout_minutes:
+            update_balance(user_id, HUPSMS_PRICE, f"Hoàn tiền thuê SMS VIP - hết 6 phút")
+            
+            await bot.send_message(
+                user_id,
+                f"❌ <b>HẾT THỜI GIAN CHỜ SMS</b>\n\n"
+                f"💎 <b>Dịch vụ:</b> SMS VIP\n"
+                f"📱 <b>Số:</b> <code>{phone}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ Đã chờ {timeout_minutes} phút nhưng không nhận được SMS.\n"
+                f"💰 <b>Đã hoàn tiền:</b> {HUPSMS_PRICE:,}đ\n"
+                f"💡 Vui lòng thử lại sau!"
+            )
+            
+            # Xóa session
+            if user_id in otp_sessions:
+                otp_sessions[user_id] = [s for s in otp_sessions[user_id] if s['id'] != session_id]
+                if not otp_sessions[user_id]:
+                    del otp_sessions[user_id]
+            return
+        
+        # Gọi API check OTP
+        try:
+            result = await check_hupsms_otp(order_id)
+            
+            if result.get('status') == 'success':
+                otp_code = result.get('otp')
+                sms_content = result.get('smsContent', '')
+                is_voice = result.get('is_voice_otp', False)
+                audio_url = result.get('audio_url', '')
+                
+                if otp_code:
+                    # Lưu vào database
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute("""
+                        INSERT INTO otp_rentals (user_id, request_id, phone_number, service_name, price, code, sms_content, status, rented_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (user_id, order_id, phone, f"SMS VIP", HUPSMS_PRICE, otp_code, sms_content, 1, datetime.now(VIETNAM_TZ).isoformat()))
+                    conn.commit()
+                    conn.close()
+                    
+                    # Gửi thông báo cho admin
+                    # Trong check_hupsms_loop, khi gửi thông báo cho admin
+                    for admin_id in ADMIN_IDS:
+                        profit = HUPSMS_PRICE - 2000  # 2680 - 2000 = 680đ
+                        await bot.send_message(
+                            admin_id,
+                            f"🔐 <b>CÓ SMS VIP MỚI</b>\n\n"
+                            f"👤 User: {user_id}\n"
+                            f"💎 DV: SMS VIP\n"
+                            f"📱 Số: {phone}\n"
+                            f"🔑 Mã: {otp_code}\n"
+                            f"🎵 Audio: {is_voice}\n"
+                            f"💰 Lợi nhuận: {profit:,}đ"
+                        )
+                    
+                    # Gửi thông báo cho user (kèm menu thuê lại)
+                    if is_voice and audio_url:
+                        await bot.send_message(
+                            user_id,
+                            f"✅ <b>NHẬN MÃ SMS VIP THÀNH CÔNG!</b>\n\n"
+                            f"💎 <b>Dịch vụ:</b> SMS VIP\n"
+                            f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                            f"🔑 <b>Mã:</b> <code>{otp_code}</code>\n"
+                            f"🎵 <b>Audio:</b> <a href='{audio_url}'>Nhấn để nghe</a>\n"
+                            f"📝 <b>Nội dung:</b> {sms_content[:100]}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💰 <b>Giá thuê mới:</b> {HUPSMS_PRICE:,}đ\n"
+                            f"♻️ <b>Giá thuê lại:</b> 3,600đ\n"
+                            f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                            f"⚠️ Mã có hiệu lực trong 2 phút!",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,600đ)", callback_data=f"sms_vip_rent_again_{order_id}_{phone}")],
+                                [InlineKeyboardButton(text="💎 Thuê SMS VIP mới", callback_data="otp_menu")],
+                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                            ])
+                        )
+                    else:
+                        await bot.send_message(
+                            user_id,
+                            f"✅ <b>NHẬN MÃ SMS VIP THÀNH CÔNG!</b>\n\n"
+                            f"💎 <b>Dịch vụ:</b> SMS VIP\n"
+                            f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                            f"🔑 <b>Mã:</b> <code>{otp_code}</code>\n"
+                            f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💰 <b>Giá thuê mới:</b> {HUPSMS_PRICE:,}đ\n"
+                            f"♻️ <b>Giá thuê lại:</b> 3,600đ\n"
+                            f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                            f"⚠️ Mã có hiệu lực trong 2 phút!",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,600đ)", callback_data=f"sms_vip_rent_again_{order_id}_{phone}")],
+                                [InlineKeyboardButton(text="💎 Thuê SMS VIP mới", callback_data="otp_menu")],
+                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                            ])
+                        )
+                    
+                    # Xóa session
+                    if user_id in otp_sessions:
+                        otp_sessions[user_id] = [s for s in otp_sessions[user_id] if s['id'] != session_id]
+                        if not otp_sessions[user_id]:
+                            del otp_sessions[user_id]
+                    return
+        except Exception as e:
+            print(f"Lỗi check HupSMS: {e}")
+        
+        await asyncio.sleep(2)
+def format_phone_number(phone: str) -> str:
+    """Xử lý số điện thoại - bỏ số 0 ở đầu nếu có"""
+    if not phone:
+        return "Chưa có"
+    phone = str(phone).strip()
+    # Nếu bắt đầu bằng số 0, bỏ số 0 đầu
+    if phone.startswith('0'):
+        return phone[1:]
+    return phone
+@dp.callback_query(F.data.startswith("sms_vip_rent_again_"))
+async def sms_vip_rent_again_handler(call: CallbackQuery):
+    """Xử lý thuê lại số SMS VIP với giá 3,600đ"""
+    data_parts = call.data.split("_")
+    # sms_vip_rent_again_orderId_phone
+    order_id = data_parts[4]
+    phone = data_parts[5]
+    
+    user = get_user(call.from_user.id)
+    balance = user[3] if isinstance(user[3], int) else 0
+    rent_again_price = 3600
+    
+    if balance < rent_again_price:
+        await call.answer(f"❌ Số dư không đủ! Cần {rent_again_price:,}đ. Bạn có {balance:,}đ", show_alert=True)
+        return
+    
+    # Gọi API thuê lại số
+    result = await call_hupsms_api("rerent", {"phone": phone})
+    
+    if result.get('status') != 'success':
+        error_msg = result.get('message', 'Lỗi không xác định')
+        await call.answer(f"❌ Lỗi thuê lại: {error_msg}", show_alert=True)
+        return
+    
+    data = result.get('data', {})
+    new_order_id = data.get('orderId')
+    new_phone = format_phone_number(data.get('phone', phone))  # Bỏ số 0 đầu
+    price = data.get('price', rent_again_price)
+    
+    if not new_order_id:
+        await call.answer("❌ Không thể thuê lại số này!", show_alert=True)
+        return
+    
+    # Trừ tiền
+    update_balance(call.from_user.id, -rent_again_price, f"Thuê lại SMS VIP - số {phone}")
+    new_balance = balance - rent_again_price
+    
+    # Tạo session mới
+    session_id = f"SMSVIP_rentagain_{new_order_id}_{int(datetime.now().timestamp())}"
+    session = {
+        'id': session_id,
+        'service': "SMS VIP",
+        'request_id': new_order_id,
+        'phone': new_phone,
+        'start_time': datetime.now(VIETNAM_TZ),
+        'api_type': 'hupsms'
+    }
+    
+    if call.from_user.id not in otp_sessions:
+        otp_sessions[call.from_user.id] = []
+    otp_sessions[call.from_user.id].append(session)
+
+    profit = rent_again_price - 2000  # 3600 - 2000 = 1600đ
+    for admin_id in ADMIN_IDS:
+        await bot.send_message(
+            admin_id,
+            f"🔐 <b>THUÊ LẠI SMS VIP</b>\n\n"
+            f"👤 User: {call.from_user.id}\n"
+            f"💎 DV: SMS VIP\n"
+            f"📱 Số: {new_phone}\n"
+            f"💰 Lợi nhuận: {profit:,}đ"
+        )
+    
+    current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
+    active_count = len(otp_sessions[call.from_user.id])
+    
+    await call.message.answer(
+        f"✅ <b>THUÊ LẠI SMS VIP THÀNH CÔNG!</b>\n\n"
+        f"💎 <b>Dịch vụ:</b> SMS VIP\n"
+        f"📱 <b>Số điện thoại:</b> <code>{new_phone}</code>\n"
+        f"♻️ <b>Thuê lại</b> (đã từng thuê trước đó)\n"
+        f"⏰ <b>Thời gian:</b> {current_time}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Giá:</b> {rent_again_price:,}đ\n"
+        f"💵 <b>Số dư còn:</b> {new_balance:,}đ\n"
+        f"📊 <b>Đang thuê:</b> {active_count} số\n\n"
+        f"⏳ <b>Đang chờ SMS...</b> (tối đa 6 phút)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Thuê SMS VIP mới", callback_data="otp_menu")],
+            [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+        ])
+    )
+    
+    # Chạy vòng lặp check OTP cho thuê lại
+    asyncio.create_task(check_hupsms_loop(call.from_user.id, session_id, new_order_id, "SMS VIP", new_phone))
 
 async def check_otp_loop(user_id: int, session_id: str, request_id: str, service: str, phone: str):
     """Vòng lặp check OTP mỗi 2 giây, tự động hoàn tiền sau 6 phút"""
@@ -1563,6 +1864,58 @@ async def otp_rent_again_handler(call: CallbackQuery):
     
     # Chạy vòng lặp check OTP cho thuê lại
     asyncio.create_task(check_otp_loop(call.from_user.id, session_id, new_request_id, service, new_phone))
+# ==================== API HupSMS ====================
+async def call_hupsms_api(endpoint: str, params: dict = None) -> dict:
+    """Gọi API HupSMS"""
+    if params is None:
+        params = {}
+    params['api_key'] = HUPSMS_API_KEY
+    url = f"{HUPSMS_API_URL}/{endpoint}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            return await resp.json()
+
+async def get_hupsms_balance() -> int:
+    """Lấy số dư tài khoản HupSMS"""
+    result = await call_hupsms_api("balance")
+    if result.get('status') == 'success':
+        return result.get('data', {}).get('balance', 0)
+    return 0
+
+async def rent_hupsms_sms() -> dict:
+    """Thuê SMS từ HupSMS (Server 3 - Test 3)"""
+    # Lấy danh sách dịch vụ
+    services = await call_hupsms_api("services", {"server": HUPSMS_SERVER})
+    if services.get('status') != 'success':
+        return None
+    
+    # Tìm dịch vụ Test 3
+    service_id = None
+    for sv in services.get('data', []):
+        if HUPSMS_SERVICE_NAME.lower() in sv.get('name', '').lower():
+            service_id = sv.get('id')
+            break
+    
+    if not service_id:
+        return None
+    
+    # Thuê số
+    result = await call_hupsms_api("rent", {"serviceId": service_id})
+    if result.get('status') == 'success':
+        return result.get('data', {})
+    return None
+
+async def check_hupsms_otp(order_id: str) -> dict:
+    """Kiểm tra OTP từ HupSMS"""
+    result = await call_hupsms_api(f"check/{order_id}")
+    if result.get('status') == 'success':
+        return result.get('data', {})
+    return None
+
+async def cancel_hupsms_order(order_id: str) -> dict:
+    """Hủy đơn HupSMS (nếu cần)"""
+    result = await call_hupsms_api(f"cancel/{order_id}")
+    return result
 # ==================== THÔNG TIN USER ====================
 @dp.callback_query(F.data == "myinfo")
 async def show_my_info(call: CallbackQuery):
