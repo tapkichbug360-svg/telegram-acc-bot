@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from sepay import app as sepay_app
 from datetime import datetime
 from psycopg2.extras import RealDictCursor
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -20,6 +20,40 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 
+# ==================== HELPER FUNCTIONS ====================
+def normalize_datetime(dt):
+    """Chuyển đổi datetime về dạng có timezone"""
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return VIETNAM_TZ.localize(dt)
+        return dt.astimezone(VIETNAM_TZ)
+    return dt
+
+def is_expired(expired_at):
+    """Kiểm tra proxy đã hết hạn chưa"""
+    if not expired_at:
+        return False
+    try:
+        expired = normalize_datetime(expired_at)
+        if expired and expired < datetime.now(VIETNAM_TZ):
+            return True
+    except Exception as e:
+        print(f"Lỗi kiểm tra expired: {e}")
+    return False
+
+def is_active_proxy(expired_at):
+    """Kiểm tra proxy còn hạn không"""
+    if not expired_at:
+        return True
+    try:
+        expired = normalize_datetime(expired_at)
+        if expired and expired > datetime.now(VIETNAM_TZ):
+            return True
+    except Exception as e:
+        print(f"Lỗi kiểm tra active: {e}")
+    return False
 # ==================== MIGRATE DATABASE LOCAL ====================
 def fix_ref_code():
     """Sửa ref_code cho user cũ trên local"""
@@ -54,7 +88,20 @@ def fix_ref_code():
         print(f"Lỗi cập nhật: {e}")
     
     conn.close()
+# ==================== CẤU HÌNH PROXY ====================
+PANDA_PROXY_TOKEN = "panda645884_5f29bcbfaf0c4e4fedd84bcdccd035589d1da0912d126f3405741a830b2346a4"
+PANDA_MERCHANT_ID = "357e7dcd-d4a0-4ada-96da-c3725d3defa6"
+PANDA_API_URL = "https://pandaproxys.com/api/v2"
 
+# Giá proxy: 12,000đ/ngày
+PROXY_PRICE_PER_DAY = 12000
+
+# Các nhà mạng
+PROXY_PROVIDERS = ["VIETTEL", "FPT", "VNPT"]
+PROXY_LOCATIONS = ["HCM", "HNI", "BDG", "RANDOM"]
+
+# Thời gian xoay IP (phút)
+ROTATE_INTERVALS = [0]
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
 ADMIN_IDS = [5180190297]
@@ -91,6 +138,37 @@ def init_db():
         status INTEGER DEFAULT 0,
         rented_at TEXT,
         refunded INTEGER DEFAULT 0
+    )''')
+    # Thêm bảng proxy_purchases
+    c.execute('''CREATE TABLE IF NOT EXISTS proxy_purchases (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        order_id TEXT,
+        proxy_id INTEGER,
+        proxy_code TEXT,
+        proxy_string TEXT,
+        protocol TEXT,
+        ip TEXT,
+        port INTEGER,
+        username TEXT,
+        password TEXT,
+        rotate_interval INTEGER,
+        provider TEXT,
+        location TEXT,
+        days INTEGER,
+        price INTEGER,
+        status TEXT DEFAULT 'ACTIVE',
+        purchased_at TEXT,
+        expired_at TIMESTAMP
+    )''')
+    
+    # Thêm bảng proxy_products_cache
+    c.execute('''CREATE TABLE IF NOT EXISTS proxy_products (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        provider TEXT,
+        price INTEGER,
+        created_at TEXT
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         telegram_id BIGINT PRIMARY KEY,
@@ -497,22 +575,927 @@ class PriceState(StatesGroup):
 class RechargeState(StatesGroup):
     waiting_for_amount = State()
     waiting_for_bill = State()
+# ==================== PROXY STATES ====================
+class ProxyState(StatesGroup):
+    waiting_for_days = State()
+    waiting_for_provider = State()
+    waiting_for_location = State()
+    waiting_for_rotate = State()
+    waiting_for_username = State()
+    waiting_for_password = State()
+    waiting_for_proxy_id_rotate = State()
+    waiting_for_proxy_id_change = State()
+    waiting_for_new_password = State()
+    waiting_for_new_rotate = State()
+    waiting_for_proxy_id_renew = State()
+    waiting_for_renew_days = State()
 
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 def main_menu(user_balance: int = 0):
     return ReplyKeyboardMarkup(
         keyboard=[
-            # Dịch vụ chính
             [KeyboardButton(text="🛒 MUA ACC"), KeyboardButton(text="🔐 THUÊ OTP")],
-            # Tiện ích
-            [KeyboardButton(text="💰 SỐ DƯ"), KeyboardButton(text="📜 LỊCH SỬ"), KeyboardButton(text="💳 NẠP TIỀN")],
-            # Khác
+            [KeyboardButton(text="🌐 MUA PROXY"), KeyboardButton(text="💰 SỐ DƯ")],  # Thêm dòng này
+            [KeyboardButton(text="📜 LỊCH SỬ"), KeyboardButton(text="💳 NẠP TIỀN")],
             [KeyboardButton(text="👥 GIỚI THIỆU"), KeyboardButton(text="👤 THÔNG TIN"), KeyboardButton(text="🆘 HỖ TRỢ")],
         ],
         resize_keyboard=True,
         input_field_placeholder="🔽 Chọn chức năng"
     )
+@dp.message(F.text == "🌐 MUA PROXY")
+async def handle_proxy_menu(msg: Message):
+    """Hiển thị menu Proxy"""
+    # Lấy số lượng proxy đang có
+    proxies = get_user_proxies(msg.from_user.id)
+    proxy_count = len(proxies)
+    
+    await msg.answer(
+        "🔐 <b>MENU PROXY</b>\n\n"
+        f"💰 <b>Giá:</b> {PROXY_PRICE_PER_DAY:,}đ/ngày\n"
+        f"📦 <b>Proxy đang có:</b> {proxy_count}\n\n"
+        "📌 <b>Chọn chức năng:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 MUA PROXY MỚI", callback_data="proxy_buy")],
+            [InlineKeyboardButton(text="📋 DANH SÁCH PROXY", callback_data="proxy_list")],
+            [InlineKeyboardButton(text="🔄 XOAY IP", callback_data="proxy_rotate")],
+            [InlineKeyboardButton(text="⏰ GIA HẠN", callback_data="proxy_renew")],
+            [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+        ])
+    )
+@dp.callback_query(F.data == "proxy_buy")
+async def proxy_buy(call: CallbackQuery, state: FSMContext):
+    """Bắt đầu mua proxy"""
+    await call.message.edit_text(
+        "🛒 <b>MUA PROXY</b>\n\n"
+        f"💰 <b>Giá:</b> {PROXY_PRICE_PER_DAY:,}đ/ngày\n\n"
+        "Chọn số ngày thuê:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📅 1 NGÀY - 12,000đ", callback_data="proxy_days_1")],
+            [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+        ])
+    )
+    await state.set_state(ProxyState.waiting_for_days)
+
+@dp.callback_query(F.data == "proxy_menu")
+async def proxy_back_menu(call: CallbackQuery):
+    """Quay lại menu proxy"""
+    await call.message.edit_text(
+        "🔐 <b>MENU PROXY</b>\n\n"
+        f"💰 <b>Giá:</b> {PROXY_PRICE_PER_DAY:,}đ/ngày\n\n"
+        "Chọn chức năng:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 MUA PROXY", callback_data="proxy_buy")],
+            [InlineKeyboardButton(text="📋 DANH SÁCH PROXY", callback_data="proxy_list")],
+            [InlineKeyboardButton(text="🔄 XOAY IP", callback_data="proxy_rotate")],
+            [InlineKeyboardButton(text="⏰ GIA HẠN", callback_data="proxy_renew")],
+            [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+        ])
+    )
+
+@dp.callback_query(F.data.startswith("proxy_days_"))
+async def proxy_select_days(call: CallbackQuery, state: FSMContext):
+    """Chọn số ngày"""
+    days = int(call.data.split("_")[2])
+    price = days * PROXY_PRICE_PER_DAY
+    
+    await state.update_data(days=days, price=price)
+    await state.update_data(provider="HOMEPROXY")  # Tự động set provider
+    
+    # Chuyển thẳng sang chọn vị trí (bỏ qua chọn nhà mạng)
+    buttons = []
+    for location in PROXY_LOCATIONS:
+        if location == "RANDOM":
+            name = "🎲 RANDOM (Ngẫu nhiên)"
+        else:
+            name = "Hồ Chí Minh" if location == "HCM" else "Hà Nội" if location == "HNI" else "Bình Dương"
+        buttons.append([InlineKeyboardButton(text=f"📍 {name}", callback_data=f"proxy_location_{location}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_buy")])
+    
+    await call.message.edit_text(
+        f"📍 <b>CHỌN VỊ TRÍ</b>\n\n"
+        f"⏰ Số ngày: {days} ngày\n"
+        f"💰 Thành tiền: {price:,}đ\n\n"
+        "Chọn vị trí (hoặc RANDOM để lấy ngẫu nhiên):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(ProxyState.waiting_for_location)
+
+@dp.callback_query(F.data.startswith("proxy_provider_"))
+async def proxy_select_provider(call: CallbackQuery, state: FSMContext):
+    """Chọn nhà mạng"""
+    provider = call.data.split("_")[2]
+    await state.update_data(provider=provider)
+    
+    # Menu chọn vị trí
+    buttons = []
+    for location in PROXY_LOCATIONS:
+        if location == "RANDOM":
+            name = "🎲 RANDOM (Ngẫu nhiên)"
+        else:
+            name = "Hồ Chí Minh" if location == "HCM" else "Hà Nội" if location == "HNI" else "Bình Dương"
+        buttons.append([InlineKeyboardButton(text=f"📍 {name}", callback_data=f"proxy_location_{location}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_buy")])
+    
+    await call.message.edit_text(
+        f"📍 <b>CHỌN VỊ TRÍ</b>\n\n"
+        f"📡 Nhà mạng: {provider}\n\n"
+        "Chọn vị trí:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(ProxyState.waiting_for_location)
+
+@dp.callback_query(F.data.startswith("proxy_location_"))
+async def proxy_select_location(call: CallbackQuery, state: FSMContext):
+    """Chọn vị trí - Tự động tạo username/password và mua luôn"""
+    import random
+    import string
+    
+    location = call.data.split("_")[2]
+    await state.update_data(location=location)
+    await state.update_data(rotate_interval=0)
+    
+    # Tự động tạo username và password
+    auto_username = f"user_{call.from_user.id}_{random.randint(1000, 9999)}"
+    auto_password = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))  # 12 ký tự
+    
+    await state.update_data(username=auto_username)
+    await state.update_data(password=auto_password)
+    
+    # Lấy các thông tin đã chọn
+    data = await state.get_data()
+    days = data.get('days', 1)
+    provider = data.get('provider', 'HOMEPROXY')
+    rotate_interval = data.get('rotate_interval', 0)
+    username = auto_username
+    password = auto_password
+    price = data.get('price', days * PROXY_PRICE_PER_DAY)
+    
+    # Kiểm tra số dư
+    user = get_user(call.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    
+    if balance < price:
+        await call.message.edit_text(
+            f"❌ <b>SỐ DƯ KHÔNG ĐỦ!</b>\n\n"
+            f"💰 Cần: {price:,}đ\n"
+            f"💵 Bạn có: {balance:,}đ\n\n"
+            f"Vui lòng nạp thêm tiền!"
+        )
+        await state.clear()
+        return
+    
+    processing_msg = await call.message.edit_text("🔄 Đang xử lý đơn hàng, vui lòng chờ...")
+    
+    # Lấy product ID
+    products = await get_proxy_products()
+    if not products:
+        await processing_msg.edit_text("❌ Không thể lấy danh sách sản phẩm proxy! Vui lòng thử lại sau.")
+        await state.clear()
+        return
+    
+    # Tìm product phù hợp (ưu tiên HOMEPROXY)
+    product_id = None
+    for p in products:
+        if p.get('provider') == "HOMEPROXY":
+            product_id = p['id']
+            break
+    if not product_id and products:
+        product_id = products[0]['id']
+    
+    # Tạo đơn hàng
+    order_result = await create_proxy_order(
+        product_id=product_id, quantity=1, days=days,
+        rotate_interval=rotate_interval,
+        location=location, username=username, password=password
+    )
+    
+    # LẤY ORDER_ID TỪ 'code' (QUAN TRỌNG!)
+    order_id = order_result.get('code') or order_result.get('orderId')
+    if not order_id:
+        await processing_msg.edit_text(f"❌ Tạo đơn thất bại! Không có mã đơn hàng.")
+        await state.clear()
+        return
+    
+    print(f"[DEBUG] Đơn hàng {order_id} - Status: {order_result.get('status')}")
+    
+    # Trừ tiền
+    update_balance(call.from_user.id, -price, f"Mua proxy {days} ngày - Đơn {order_id}")
+    
+    # CHỜ 10 GIÂY CHO PROXY ĐƯỢC TẠO
+    await processing_msg.edit_text(f"⏳ Đơn hàng {order_id} đang được xử lý... Vui lòng chờ 10 giây.")
+    await asyncio.sleep(10)
+    
+    # Lấy lại danh sách proxy để tìm proxy mới
+    all_proxies = await get_user_proxies_api()
+    found_proxy = None
+    for p in all_proxies:
+        if p.get('order', {}).get('code') == order_id or p.get('code') == order_id:
+            found_proxy = p
+            break
+    
+    if found_proxy:
+        # Debug trước khi lưu
+        print(f"[DEBUG] user_id={call.from_user.id}, order_id={order_id}, days={days}, price={price}")
+        print(f"[DEBUG] found_proxy type: {type(found_proxy)}")
+        if found_proxy:
+            print(f"[DEBUG] found_proxy keys: {list(found_proxy.keys())}")
+            proxy_info_debug = found_proxy.get('proxy', {})
+            print(f"[DEBUG] proxy_info keys: {list(proxy_info_debug.keys())}")
+            ip_info_debug = proxy_info_debug.get('ipaddress', {})
+            print(f"[DEBUG] ip_info keys: {list(ip_info_debug.keys())}")
+        # Ép kiểu trước khi lưu
+        clean_order_id = str(order_id) if order_id else ''
+        clean_found_proxy = {
+            'id': found_proxy.get('id'),
+            'code': found_proxy.get('code'),
+            'proxy': found_proxy.get('proxy'),
+            'protocol': found_proxy.get('protocol'),
+        }
+        save_proxy_purchase(call.from_user.id, clean_order_id, clean_found_proxy, days, price)
+    # ==================== GỬI THÔNG BÁO CHO ADMIN ====================
+    for admin_id in ADMIN_IDS:
+        try:
+            profit = price - 4000  # Lợi nhuận = 12,000 - 4,000 = 8,000đ
+            await bot.send_message(
+                admin_id,
+                f"🔄 <b>CÓ ĐƠN MUA PROXY MỚI</b>\n\n"
+                f"👤 <b>User:</b> <code>{call.from_user.id}</code>\n"
+                f"📝 <b>Tên:</b> {call.from_user.full_name}\n"
+                f"💬 <b>Username:</b> @{call.from_user.username or 'không có'}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 <b>Số ngày:</b> {days} ngày\n"
+                f"💰 <b>Giá bán:</b> {price:,}đ\n"
+                f"💸 <b>Giá gốc:</b> 4,000đ\n"
+                f"📈 <b>Lợi nhuận:</b> <b>{profit:,}đ</b>\n"
+                f"🆔 <b>Mã đơn:</b> <code>{order_id}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📡 <b>Nhà mạng:</b> {provider}\n"
+                f"📍 <b>Vị trí:</b> {location}\n"
+                f"🔄 <b>Xoay:</b> {rotate_interval} phút\n"
+                f"👤 <b>Username:</b> <code>{username}</code>\n"
+                f"🔑 <b>Password:</b> <code>{password}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🌐 <b>IP:</b> <code>{ip_info.get('ip')}:{proxy_info.get('port')}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 <b>Thời gian:</b> {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}"
+            )
+        except Exception as e:
+            print(f"Lỗi gửi thông báo admin: {e}")
+        new_balance = balance - price
+        
+        proxy_info = found_proxy.get('proxy', {})
+        ip_info = proxy_info.get('ipaddress', {})
+        
+        await processing_msg.edit_text(
+            f"✅ <b>MUA PROXY THÀNH CÔNG!</b>\n\n"
+            f"📅 Số ngày: {days} ngày\n"
+            f"💰 Giá: {price:,}đ\n"
+            f"💵 Số dư còn: {new_balance:,}đ\n"
+            f"🆔 Mã đơn: {order_id}\n\n"
+            f"🌐 IP: <code>{ip_info.get('ip')}:{proxy_info.get('port')}</code>\n"
+            f"👤 Username: <code>{proxy_info.get('username')}</code>\n"
+            f"🔑 Password: <code>{proxy_info.get('password')}</code>\n\n"
+            f"📋 Dùng lệnh <b>/proxy_list</b> để xem danh sách proxy!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 XEM DANH SÁCH", callback_data="proxy_list")],
+                [InlineKeyboardButton(text="🛒 MUA TIẾP", callback_data="proxy_buy")],
+                [InlineKeyboardButton(text="🏠 MENU CHÍNH", callback_data="menu")]
+            ])
+        )
+    else:
+        await processing_msg.edit_text(
+            f"✅ <b>ĐÃ TẠO ĐƠN HÀNG THÀNH CÔNG!</b>\n\n"
+            f"📅 Số ngày: {days} ngày\n"
+            f"💰 Giá: {price:,}đ\n"
+            f"💵 Số dư còn: {new_balance:,}đ\n"
+            f"🆔 Mã đơn: {order_id}\n\n"
+            f"⚠️ Proxy đang được tạo, vui lòng kiểm tra lại sau bằng lệnh <b>/proxy_list</b>!"
+        )
+    
+    await state.clear()
+
+import random
+import string
+
+@dp.callback_query(F.data.startswith("proxy_rotate_"))
+async def proxy_select_rotate(call: CallbackQuery, state: FSMContext):
+    """Xử lý mua proxy cuối cùng - ĐÃ TỐI ƯU"""
+    # 1. Lấy dữ liệu từ state
+    interval = int(call.data.split("_")[2])
+    await state.update_data(rotate_interval=interval)
+    data = await state.get_data()
+    
+    days = data.get('days', 1)
+    location = data.get('location', 'HCM')
+    rotate_interval = data.get('rotate_interval', 0)
+    price = days * PROXY_PRICE_PER_DAY
+    
+    # Tạo user/pass tự động
+    auto_username = f"user_{call.from_user.id}_{random.randint(1000, 9999)}"
+    auto_password = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+    
+    # 2. Kiểm tra số dư user
+    user = get_user(call.from_user.id)
+    balance = user[3] if isinstance(user[3], int) else 0
+    if balance < price:
+        await call.message.edit_text(f"❌ Số dư không đủ! Cần {price:,}đ, bạn có {balance:,}đ.")
+        await state.clear()
+        return
+    
+    processing_msg = await call.message.edit_text("🔄 Đang xử lý...")
+    
+    # 3. Lấy product ID cho HOMEPROXY
+    products = await get_proxy_products()
+    if not products:
+        await processing_msg.edit_text("❌ Lỗi lấy danh sách sản phẩm.")
+        await state.clear()
+        return
+        
+    product_id = None
+    for p in products:
+        if p.get('provider') == 'HOMEPROXY':
+            product_id = p['id']
+            break
+    if not product_id:
+        product_id = products[0]['id']
+    
+    # 4. GỌI API PANDA PROXY (PHẦN QUAN TRỌNG NHẤT)
+    # Đảm bảo provider luôn là HOMEPROXY và password đủ dài
+    order_result = await create_proxy_order(
+        product_id=product_id, quantity=1, days=days,
+        rotate_interval=rotate_interval,
+        location=location, username=auto_username, password=auto_password
+    )
+    
+    # 5. XỬ LÝ KẾT QUẢ TỪ API
+    order_code = order_result.get('code')
+    if not order_code:
+        error_detail = order_result.get('errors', order_result.get('message', 'Lỗi không xác định'))
+        await processing_msg.edit_text(f"❌ Tạo đơn thất bại! Lỗi: {error_detail}")
+        await state.clear()
+        return
+    
+    # 6. Thành công, trừ tiền user
+    update_balance(call.from_user.id, -price, f"Mua proxy {days} ngày - Mã đơn {order_code}")
+    await processing_msg.edit_text(f"✅ Đã tạo đơn hàng {order_code}! Đang chờ proxy được cấp...")
+    
+    # 7. CHỜ PROXY ĐƯỢC TẠO (QUAN TRỌNG)
+    await asyncio.sleep(15)
+    
+    # 8. TÌM PROXY VỪA TẠO ĐỂ LƯU VÀO DB
+    all_proxies = await get_user_proxies_api()
+    found_proxy = None
+    for proxy in all_proxies:
+        if proxy.get('order', {}).get('code') == order_code:
+            found_proxy = proxy
+            break
+    
+    if found_proxy:
+        proxy_info = found_proxy.get('proxy', {})
+        ip_info = proxy_info.get('ipaddress', {})
+        
+        # Lưu vào database
+        save_proxy_purchase(call.from_user.id, order_code, found_proxy, days, price)
+        
+        await processing_msg.edit_text(
+            f"✅ MUA PROXY THÀNH CÔNG!\n"
+            f"🌐 IP: {ip_info.get('ip')}:{proxy_info.get('port')}\n"
+            f"🔑 User: {proxy_info.get('username')}\n"
+            f"🔒 Pass: {proxy_info.get('password')}\n"
+            f"📅 Hạn: {days} ngày\n"
+            f"Dùng lệnh /proxy_list để xem chi tiết."
+        )
+    else:
+        await processing_msg.edit_text(f"⚠️ Đơn hàng {order_code} đang được xử lý. Vui lòng kiểm tra lại sau bằng lệnh /proxy_list.")
+    
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("proxy_detail_"))
+async def proxy_detail_handler(call: CallbackQuery):
+    """Xem chi tiết 1 proxy"""
+    db_id = int(call.data.split("_")[2])
+    proxies = get_user_proxies(call.from_user.id)
+    proxy = next((p for p in proxies if p['db_id'] == db_id), None)
+    
+    if not proxy:
+        await call.answer("❌ Không tìm thấy proxy!", show_alert=True)
+        return
+    
+    # Format ngày hết hạn
+    expired_str = "Không rõ"
+    is_expired_flag = False
+    
+    if proxy['expired_at']:
+        try:
+            expired = normalize_datetime(proxy['expired_at'])
+            if expired:
+                expired_str = expired.strftime('%d/%m/%Y %H:%M')
+                if expired < datetime.now(VIETNAM_TZ):
+                    is_expired_flag = True
+        except Exception:
+            expired_str = str(proxy['expired_at'])[:16] if proxy['expired_at'] else "Không rõ"
+    
+    status_text = "✅ Đang hoạt động" if not is_expired_flag and proxy['status'] == 'ACTIVE' else "⚠️ Đã hết hạn"
+    
+    text = f"""
+📡 <b>CHI TIẾT PROXY #{proxy['db_id']}</b>
+
+🌐 <b>IP:</b> <code>{proxy['ip']}:{proxy['port']}</code>
+🔗 <b>Proxy:</b> <code>{proxy['proxy_string']}</code>
+👤 <b>Username:</b> <code>{proxy['username']}</code>
+🔑 <b>Password:</b> <code>{proxy['password']}</code>
+📡 <b>Nhà mạng:</b> {proxy['provider']}
+📍 <b>Vị trí:</b> {proxy['location'] or 'Random'}
+🔄 <b>Xoay IP:</b> {proxy['rotate_interval']} phút
+📅 <b>Ngày mua:</b> {proxy['purchased_at'][:19] if proxy['purchased_at'] else 'Không rõ'}
+⏰ <b>Hết hạn:</b> {expired_str}
+💰 <b>Giá:</b> {proxy['price']:,}đ
+📊 <b>Trạng thái:</b> {status_text}
+"""
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 XOAY IP", callback_data=f"proxy_do_rotate_{proxy['proxy_id']}")],
+        [InlineKeyboardButton(text="✏️ ĐỔI MK", callback_data=f"proxy_select_change_{proxy['db_id']}")],
+        [InlineKeyboardButton(text="⏰ GIA HẠN", callback_data=f"proxy_select_renew_{proxy['db_id']}")],
+        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_list")]
+    ]))
+
+@dp.callback_query(F.data == "noop")
+async def noop_handler(call: CallbackQuery):
+    """Handler cho nút trang trí"""
+    await call.answer()  # Chỉ để tránh lỗi callback timeout
+@dp.message(Command("rotate"))
+async def cmd_rotate_proxy(msg: Message):
+    """Lệnh nhanh xoay IP: /rotate <proxy_id>"""
+    args = msg.text.split()
+    if len(args) < 2:
+        await msg.answer("❌ Sai format!\nDùng: <code>/rotate proxy_id</code>\nVí dụ: <code>/rotate 12345</code>\n\n📋 Xem danh sách proxy với lệnh <code>/proxy_list</code>")
+        return
+    
+    try:
+        proxy_id = int(args[1])
+        
+        # Kiểm tra proxy có thuộc user không
+        proxies = get_user_proxies(msg.from_user.id)
+        proxy = next((p for p in proxies if p['proxy_id'] == proxy_id), None)
+        
+        if not proxy:
+            await msg.answer(f"❌ Không tìm thấy proxy ID {proxy_id} hoặc không phải của bạn!")
+            return
+        
+        status_msg = await msg.answer(f"🔄 Đang xoay IP cho proxy #{proxy_id}...")
+        
+        result = await rotate_proxy_ip(proxy_id)
+        
+        if result.get('status') == 'success':
+            new_ip = result.get('ip', 'Không rõ')
+            proxy_string = result.get('proxy', '')
+            
+            await status_msg.edit_text(
+                f"✅ <b>XOAY IP THÀNH CÔNG!</b>\n\n"
+                f"🆔 Proxy ID: {proxy_id}\n"
+                f"🌐 IP mới: <code>{new_ip}</code>\n"
+                f"🔗 Proxy: <code>{proxy_string}</code>\n\n"
+                f"💡 Bạn có thể xoay IP bất cứ lúc nào bạn muốn!"
+            )
+        else:
+            await status_msg.edit_text(
+                f"❌ <b>XOAY IP THẤT BẠI!</b>\n\n"
+                f"Lỗi: {result.get('message', 'Không xác định')}\n"
+                f"Vui lòng thử lại sau!"
+            )
+            
+    except ValueError:
+        await msg.answer("❌ Proxy ID phải là số!")
+@dp.callback_query(F.data == "proxy_list")
+async def proxy_list(call: CallbackQuery):
+    """Xem danh sách proxy đã mua"""
+    proxies = get_user_proxies(call.from_user.id)
+    
+    if not proxies:
+        await call.message.edit_text(
+            "📭 Bạn chưa mua proxy nào!\n\n🛒 Hãy mua proxy để sử dụng:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 MUA PROXY NGAY", callback_data="proxy_buy")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+            ])
+        )
+        return
+    
+    # Đếm số lượng proxy còn hạn
+    active_count = 0
+    for p in proxies:
+        if is_active_proxy(p['expired_at']):
+            active_count += 1
+    
+    text = f"📋 <b>DANH SÁCH PROXY CỦA BẠN</b>\n"
+    text += f"📊 Tổng: {len(proxies)} | ✅ Còn hạn: {active_count}\n\n"
+    
+    # Tạo danh sách proxy
+    buttons = []
+    for i, p in enumerate(proxies[:10], 1):
+        # Định dạng ngày hết hạn
+        expired_str = "Không rõ"
+        status_icon = "❓"
+        status_text = "Không rõ"
+        
+        if p['expired_at']:
+            try:
+                expired = normalize_datetime(p['expired_at'])
+                if expired:
+                    expired_str = expired.strftime('%d/%m/%Y')
+                    if expired > datetime.now(VIETNAM_TZ):
+                        status_icon = "✅"
+                        status_text = "Còn hạn"
+                    else:
+                        status_icon = "❌"
+                        status_text = "Hết hạn"
+            except Exception:
+                expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
+        
+        # Tiêu đề proxy
+        text += f"{status_icon} <b>Proxy #{i}</b> (ID: {p['proxy_id']})\n"
+        text += f"   🌐 <code>{p['ip']}:{p['port']}</code>\n"
+        text += f"   👤 {p['username']}:{p['password']}\n"
+        text += f"   📅 Hết hạn: {expired_str} | {status_text}\n"
+        text += f"   🔄 Xoay: {p['rotate_interval']} phút\n\n"
+        
+        # Nút chức năng cho từng proxy
+        buttons.append([
+            InlineKeyboardButton(text=f"🔄 XOAY #{i}", callback_data=f"proxy_do_rotate_{p['proxy_id']}"),
+            InlineKeyboardButton(text=f"⏰ GIA HẠN #{i}", callback_data=f"proxy_select_renew_{p['db_id']}")
+        ])
+    
+    # Nút chức năng chung
+    buttons.append([InlineKeyboardButton(text="🛒 MUA THÊM", callback_data="proxy_buy")])
+    buttons.append([InlineKeyboardButton(text="🔙 MENU PROXY", callback_data="proxy_menu")])
+    
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+# ==================== PROXY XOAY IP ====================
+@dp.callback_query(F.data == "proxy_rotate")
+async def proxy_rotate_menu(call: CallbackQuery, state: FSMContext):
+    """Hiển thị danh sách proxy để chọn xoay IP"""
+    proxies = get_user_proxies(call.from_user.id)
+    
+    if not proxies:
+        await call.message.edit_text(
+            "📭 Bạn chưa có proxy nào để xoay IP!\n\n🛒 Hãy mua proxy trước.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 MUA PROXY", callback_data="proxy_buy")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+            ])
+        )
+        return
+    
+    text = "🔄 <b>XOAY IP PROXY</b>\n\n"
+    text += "Chọn proxy bạn muốn xoay IP:\n\n"
+    
+    buttons = []
+    for i, p in enumerate(proxies[:10], 1):
+        # Kiểm tra còn hạn không
+        is_expired_flag = is_expired(p['expired_at'])
+        is_active = not is_expired_flag and p['status'] == 'ACTIVE'
+        
+        status_icon = "✅" if is_active else "❌"
+        
+        text += f"{status_icon} <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
+        if not is_active:
+            text += f"   ⚠️ Proxy đã hết hạn, vui lòng gia hạn trước khi xoay IP\n"
+        
+        buttons.append([InlineKeyboardButton(
+            text=f"{status_icon} Xoay Proxy #{i} - {p['ip']}:{p['port']}",
+            callback_data=f"proxy_do_rotate_{p['proxy_id']}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")])
+    
+    final_text = text + "\n👇 <b>Chọn proxy cần xoay:</b>"
+    await call.message.edit_text(final_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(F.data.startswith("proxy_do_rotate_"))
+async def proxy_do_rotate(call: CallbackQuery):
+    """Thực hiện xoay IP"""
+    proxy_id = int(call.data.split("_")[3])
+    
+    await call.message.edit_text("🔄 Đang xoay IP, vui lòng chờ...")
+    
+    result = await rotate_proxy_ip(proxy_id)
+    
+    # Kiểm tra xem có message không (chứa thông báo lỗi hoặc thời gian chờ)
+    message = result.get('message', '')
+    
+    # Nếu có message chứa "Chưa tới thời gian xoay"
+    if 'Chưa tới thời gian xoay' in message:
+        import re
+        time_match = re.search(r'(\d+)\s*s', message)
+        if time_match:
+            seconds = time_match.group(1)
+            await call.message.edit_text(
+                f"⏳ <b>CHƯA TỚI THỜI GIAN XOAY!</b>\n\n"
+                f"🔒 Vui lòng chờ <b>{seconds} giây</b> nữa mới có thể xoay IP tiếp.\n\n"
+                f"💡 Hệ thống giới hạn thời gian xoay để tránh spam.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_list")]
+                ])
+            )
+        else:
+            await call.message.edit_text(
+                f"⏳ <b>CHƯA TỚI THỜI GIAN XOAY!</b>\n\n"
+                f"🔒 {message}\n\n"
+                f"💡 Vui lòng thử lại sau vài giây.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_list")]
+                ])
+            )
+    elif 'Xoay proxy thành công' in message:
+        new_ip = result.get('ip', 'Không rõ')
+        proxy_string = result.get('proxy', '')
+        
+        await call.message.edit_text(
+            f"✅ <b>XOAY IP THÀNH CÔNG!</b>\n\n"
+            f"🌐 IP mới: <code>{new_ip}</code>\n"
+            f"🔗 Proxy: <code>{proxy_string}</code>\n\n"
+            f"💡 Proxy đã được cập nhật IP mới!\n"
+            f"⏰ Lần xoay tiếp theo sau 1 phút.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Xoay tiếp", callback_data="proxy_rotate")],
+                [InlineKeyboardButton(text="📋 Danh sách", callback_data="proxy_list")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+            ])
+        )
+    elif result.get('status') == 'success':
+        # Fallback cho trường hợp success thông thường
+        new_ip = result.get('ip', 'Không rõ')
+        proxy_string = result.get('proxy', '')
+        
+        await call.message.edit_text(
+            f"✅ <b>XOAY IP THÀNH CÔNG!</b>\n\n"
+            f"🌐 IP mới: <code>{new_ip}</code>\n"
+            f"🔗 Proxy: <code>{proxy_string}</code>\n\n"
+            f"💡 Proxy đã được cập nhật IP mới!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Xoay tiếp", callback_data="proxy_rotate")],
+                [InlineKeyboardButton(text="📋 Danh sách", callback_data="proxy_list")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+            ])
+        )
+    else:
+        # Lỗi khác
+        await call.message.edit_text(
+            f"❌ <b>XOAY IP THẤT BẠI!</b>\n\n"
+            f"Lỗi: {result.get('message', 'Không xác định')}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Thử lại", callback_data="proxy_rotate")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+            ])
+        )
+
+# ==================== PROXY GIA HẠN ====================
+@dp.callback_query(F.data == "proxy_renew")
+async def proxy_renew_menu(call: CallbackQuery, state: FSMContext):
+    """Hiển thị danh sách proxy để gia hạn"""
+    proxies = get_user_proxies(call.from_user.id)
+    
+    if not proxies:
+        await call.message.edit_text(
+            "📭 Bạn chưa có proxy nào để gia hạn!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 MUA PROXY", callback_data="proxy_buy")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+            ])
+        )
+        return
+    
+    text = "⏰ <b>GIA HẠN PROXY</b>\n\n"
+    text += f"💰 <b>Giá gia hạn:</b> {PROXY_PRICE_PER_DAY:,}đ/ngày\n"
+    text += "📅 <b>Các gói gia hạn:</b> 1 ngày, 7 ngày, 30 ngày, 90 ngày\n\n"
+    text += "Chọn proxy cần gia hạn:\n\n"
+    
+    buttons = []
+    for i, p in enumerate(proxies[:10], 1):
+        # Định dạng ngày hết hạn
+        expired_str = "Không rõ"
+        status_icon = "❓"
+        status_text = "Không rõ"
+        
+        if p['expired_at']:
+            try:
+                expired = normalize_datetime(p['expired_at'])
+                if expired:
+                    expired_str = expired.strftime('%d/%m/%Y')
+                    if expired > datetime.now(VIETNAM_TZ):
+                        status_icon = "✅"
+                        status_text = "Còn hạn"
+                    else:
+                        status_icon = "⚠️"
+                        status_text = "ĐÃ HẾT HẠN"
+            except Exception:
+                expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
+        
+        text += f"{status_icon} <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
+        text += f"   📅 Hết hạn: {expired_str} | {status_text}\n\n"
+        
+        buttons.append([InlineKeyboardButton(
+            text=f"⏰ Gia hạn Proxy #{i}",
+            callback_data=f"proxy_select_renew_{p['db_id']}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")])
+    
+    final_text = text + "👇 <b>Chọn proxy cần gia hạn:</b>"
+    await call.message.edit_text(final_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(F.data.startswith("proxy_select_renew_"))
+async def proxy_select_renew(call: CallbackQuery, state: FSMContext):
+    """Chọn proxy để gia hạn"""
+    db_id = int(call.data.split("_")[3])
+    await state.update_data(proxy_db_id=db_id)
+    
+    await call.message.edit_text(
+        "⏰ <b>NHẬP SỐ NGÀY GIA HẠN</b>\n\n"
+        f"💰 Giá: {PROXY_PRICE_PER_DAY:,}đ/ngày\n\n"
+        "Nhập số ngày muốn gia hạn (1, 7, 30, 90):\n\n"
+        "Gửi /cancel để hủy"
+    )
+    await state.set_state(ProxyState.waiting_for_renew_days)
+
+@dp.message(ProxyState.waiting_for_renew_days)
+async def proxy_do_renew(msg: Message, state: FSMContext):
+    """Thực hiện gia hạn"""
+    try:
+        days = int(msg.text.strip())
+        if days not in [1, 7, 30, 90]:
+            await msg.answer("❌ Số ngày không hợp lệ! Vui lòng chọn: 1, 7, 30, 90")
+            return
+        
+        data = await state.get_data()
+        db_id = data.get('proxy_db_id')
+        
+        # Lấy thông tin proxy
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT proxy_id, price FROM proxy_purchases WHERE id = %s AND user_id = %s", (db_id, msg.from_user.id))
+        result = c.fetchone()
+        
+        if not result:
+            await msg.answer("❌ Không tìm thấy proxy!")
+            await state.clear()
+            conn.close()
+            return
+        
+        proxy_id = result[0]
+        old_price = result[1]
+        conn.close()
+        
+        # Tính giá gia hạn
+        renew_price = days * PROXY_PRICE_PER_DAY
+        
+        # Kiểm tra số dư
+        user = get_user(msg.from_user.id)
+        balance = user[3] if user and isinstance(user[3], int) else 0
+        
+        if balance < renew_price:
+            await msg.answer(
+                f"❌ <b>SỐ DƯ KHÔNG ĐỦ!</b>\n\n"
+                f"💰 Cần: {renew_price:,}đ\n"
+                f"💵 Bạn có: {balance:,}đ\n\n"
+                f"Vui lòng nạp thêm tiền!"
+            )
+            await state.clear()
+            return
+        
+        await msg.answer("🔄 Đang gia hạn proxy...")
+        
+        # Gọi API gia hạn
+        result_api = await renew_proxies([proxy_id], days)
+        
+        if result_api.get('success'):
+            # Trừ tiền
+            update_balance(msg.from_user.id, -renew_price, f"Gia hạn proxy {days} ngày")
+            
+            # Cập nhật database
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("""
+                UPDATE proxy_purchases 
+                SET days = days + %s, 
+                    price = price + %s,
+                    expired_at = expired_at + INTERVAL '%s days',
+                    status = 'ACTIVE'
+                WHERE id = %s
+            """, (days, renew_price, days, db_id))
+            conn.commit()
+            conn.close()
+            
+            await msg.answer(
+                f"✅ <b>GIA HẠN THÀNH CÔNG!</b>\n\n"
+                f"📅 Gia hạn: {days} ngày\n"
+                f"💰 Phí: {renew_price:,}đ\n"
+                f"💵 Số dư còn: {balance - renew_price:,}đ",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Danh sách proxy", callback_data="proxy_list")],
+                    [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
+                ])
+            )
+        else:
+            await msg.answer("❌ Gia hạn thất bại! Vui lòng thử lại sau.")
+        
+        await state.clear()
+        
+    except ValueError:
+        await msg.answer("❌ Vui lòng nhập số ngày hợp lệ!")
+@dp.message(Command("buy_proxy"))
+async def cmd_buy_proxy(msg: Message, state: FSMContext):
+    """Lệnh nhanh mua proxy"""
+    # Tạo fake callback
+    fake_call = types.CallbackQuery(
+        id="1", 
+        from_user=msg.from_user, 
+        chat_instance="1", 
+        data="proxy_buy", 
+        message=msg
+    )
+    await proxy_buy(fake_call, state)
+@dp.message(Command("renew"))
+async def cmd_renew_proxy(msg: Message, state: FSMContext):
+    """Lệnh nhanh gia hạn: /renew <proxy_id> <số_ngày>"""
+    args = msg.text.split()
+    if len(args) < 3:
+        await msg.answer(
+            "❌ Sai format!\n"
+            "Dùng: <code>/renew proxy_id số_ngày</code>\n"
+            "Ví dụ: <code>/renew 12345 7</code>\n\n"
+            "📋 Xem danh sách proxy với lệnh <code>/proxy_list</code>\n"
+            "📅 Số ngày có thể: 1, 7, 30, 90"
+        )
+        return
+    
+    try:
+        proxy_id = int(args[1])
+        days = int(args[2])
+        
+        if days not in [1, 7, 30, 90]:
+            await msg.answer("❌ Số ngày không hợp lệ! Vui lòng chọn: 1, 7, 30, 90")
+            return
+        
+        # Tìm proxy
+        proxies = get_user_proxies(msg.from_user.id)
+        proxy = next((p for p in proxies if p['proxy_id'] == proxy_id), None)
+        
+        if not proxy:
+            await msg.answer(f"❌ Không tìm thấy proxy ID {proxy_id} hoặc không phải của bạn!")
+            return
+        
+        renew_price = days * PROXY_PRICE_PER_DAY
+        
+        # Kiểm tra số dư
+        user = get_user(msg.from_user.id)
+        balance = user[3] if user and isinstance(user[3], int) else 0
+        
+        if balance < renew_price:
+            await msg.answer(
+                f"❌ <b>SỐ DƯ KHÔNG ĐỦ!</b>\n\n"
+                f"💰 Cần: {renew_price:,}đ\n"
+                f"💵 Bạn có: {balance:,}đ"
+            )
+            return
+        
+        status_msg = await msg.answer(f"🔄 Đang gia hạn proxy #{proxy_id} thêm {days} ngày...")
+        
+        # Gọi API gia hạn
+        result_api = await renew_proxies([proxy_id], days)
+        
+        if result_api.get('success'):
+            # Trừ tiền
+            update_balance(msg.from_user.id, -renew_price, f"Gia hạn proxy {days} ngày")
+            
+            # Cập nhật database
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("""
+                UPDATE proxy_purchases 
+                SET days = days + %s, 
+                    price = price + %s,
+                    expired_at = expired_at + INTERVAL '%s days',
+                    status = 'ACTIVE'
+                WHERE proxy_id = %s AND user_id = %s
+            """, (days, renew_price, days, proxy_id, msg.from_user.id))
+            conn.commit()
+            conn.close()
+            
+            await status_msg.edit_text(
+                f"✅ <b>GIA HẠN THÀNH CÔNG!</b>\n\n"
+                f"🆔 Proxy ID: {proxy_id}\n"
+                f"📅 Gia hạn: {days} ngày\n"
+                f"💰 Phí: {renew_price:,}đ\n"
+                f"💵 Số dư còn: {balance - renew_price:,}đ"
+            )
+        else:
+            await status_msg.edit_text("❌ Gia hạn thất bại! Vui lòng thử lại sau.")
+        
+    except ValueError:
+        await msg.answer("❌ Proxy ID và số ngày phải là số!")
 
 def admin_menu():
     return ReplyKeyboardMarkup(
@@ -1127,6 +2110,310 @@ async def show_history(call: CallbackQuery):
     except:
         pass
 
+# ==================== PROXY API ====================
+async def call_panda_api(endpoint: str, method: str = "GET", data: dict = None) -> dict:
+    """Gọi API PandaProxy"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {PANDA_PROXY_TOKEN}",
+        "x-merchant-id": PANDA_MERCHANT_ID
+    }
+    
+    url = f"{PANDA_API_URL}/{endpoint}"
+    
+    print(f"[DEBUG] Gọi API: {method} {url}")
+    if data:
+        print(f"[DEBUG] Data: {data}")
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            if method == "GET":
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    print(f"[DEBUG] Response status: {resp.status}")
+                    result = await resp.json()
+                    print(f"[DEBUG] Response: {str(result)[:500]}")
+                    return result
+            else:
+                async with session.post(url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    print(f"[DEBUG] Response status: {resp.status}")
+                    result = await resp.json()
+                    print(f"[DEBUG] Response: {str(result)[:500]}")
+                    return result
+        except Exception as e:
+            logger.error(f"Lỗi gọi Panda API: {e}")
+            return {"error": str(e), "status_code": 500}
+
+async def get_proxy_products() -> List[dict]:
+    """Lấy danh sách sản phẩm Proxy xoay"""
+    # Kiểm tra cache
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, name, provider, price FROM proxy_products")
+    cached = c.fetchall()
+    
+    if cached:
+        products = [{'id': p[0], 'name': p[1], 'provider': p[2], 'price': p[3]} for p in cached]
+        conn.close()
+        print(f"[DEBUG] Lấy {len(products)} sản phẩm từ cache")
+        return products
+    
+    # Gọi API - SỬA URL FILTER
+    # Cách 1: Dùng params riêng
+    from urllib.parse import urlencode
+    params = {
+        "filters": '{"category":{"categorytype":{"id":2}}}'
+    }
+    url = f"products?{urlencode(params)}"
+    
+    print(f"[DEBUG] Gọi API products: {url}")
+    result = await call_panda_api(url)
+    
+    # Nếu lỗi, thử cách 2: Bỏ filter
+    if result.get('error') or result.get('status_code') == 400:
+        print("[DEBUG] Thử lại không có filter")
+        result = await call_panda_api("products")
+    
+    if result.get('data'):
+        products = []
+        for p in result['data']:
+            # Kiểm tra xem có phải proxy xoay không (categorytype.id == 2)
+            category = p.get('category', {})
+            category_type = category.get('categorytype', {})
+            if category_type.get('id') != 2:
+                continue  # Bỏ qua nếu không phải proxy xoay
+                
+            product = {
+                'id': p['id'],
+                'name': p['name'],
+                'provider': p.get('provider', 'VIETTEL'),
+                'price': p.get('price', 80000)
+            }
+            products.append(product)
+            
+            # Lưu cache
+            c.execute("INSERT INTO proxy_products (id, name, provider, price, created_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET price = %s",
+                      (product['id'], product['name'], product['provider'], product['price'], datetime.now(VIETNAM_TZ).isoformat(), product['price']))
+        
+        conn.commit()
+        conn.close()
+        print(f"[DEBUG] Lấy {len(products)} sản phẩm từ API")
+        return products
+    
+    # FALLBACK: Trả về danh sách sản phẩm mặc định
+    print("[DEBUG] Không lấy được sản phẩm từ API, dùng danh sách mặc định")
+    default_products = [
+        {'id': '550e8400-e29b-41d4-a716-446655440000', 'name': 'Proxy Xoay VIETTEL', 'provider': 'VIETTEL', 'price': 80000},
+        {'id': '550e8400-e29b-41d4-a716-446655440001', 'name': 'Proxy Xoay FPT', 'provider': 'FPT', 'price': 80000},
+        {'id': '550e8400-e29b-41d4-a716-446655440002', 'name': 'Proxy Xoay VNPT', 'provider': 'VNPT', 'price': 80000},
+    ]
+    conn.close()
+    return default_products
+
+async def create_proxy_order(product_id: str, quantity: int, days: int, rotate_interval: int, 
+                              location: str, username: str, password: str, protocol: str = "HTTP") -> dict:
+    data = {
+        "paymentMethod": "WALLET",
+        "products": [{
+            "dayOfUse": days,
+            "rotateInterval": rotate_interval,
+            "password": password,
+            "user": username,
+            "protocolType": protocol,
+            "quantity": quantity,
+            "provider": "HOMEPROXY",  # 🚨 BẮT BUỘC PHẢI CÓ DÒNG NÀY VÀ PHẢI ĐÚNG CHÍNH TẢ
+            "product": {"id": product_id}
+        }]
+    }
+    if location and location != "RANDOM":
+        data["products"][0]["location"] = location
+    result = await call_panda_api("orders", method="POST", data=data)
+    return result
+
+async def get_user_proxies_api(order_id: str = None) -> List[dict]:
+    """Lấy danh sách Proxy đã mua từ API"""
+    url = "users/proxies?sort=[{\"orderBy\":\"createdAt\",\"order\":\"desc\"}]&filters={\"proxy\":{\"ipaddress\":{\"categorytype\":{\"id\":2}}}}"
+    
+    if order_id:
+        url += f"&filter=orderId:$eq:string:{order_id}"
+    
+    result = await call_panda_api(url)
+    return result.get('data', [])
+
+async def rotate_proxy_ip(proxy_id: int) -> dict:
+    """Xoay IP cho Proxy"""
+    result = await call_panda_api(f"proxies/{proxy_id}/rotate", method="GET")
+    return result
+
+async def change_proxy_info(proxy_ids: List[int], password: str, rotate_interval: int) -> dict:
+    """Đổi thông tin Proxy"""
+    data = {
+        "userProxyIds": proxy_ids,
+        "password": password,
+        "rotateInterval": rotate_interval
+    }
+    result = await call_panda_api("orders/change-info-proxies", method="POST", data=data)
+    return result
+
+async def renew_proxies(proxy_ids: List[int], days: int) -> dict:
+    """Gia hạn Proxy"""
+    data = {
+        "userProxyIds": proxy_ids,
+        "dayOfRenewal": days,
+        "isRenewal": False,
+        "categoryTypeId": 2
+    }
+    result = await call_panda_api("orders/renewal-proxies", method="POST", data=data)
+    return result
+
+def save_proxy_purchase(user_id: int, order_id: str, proxy_data: dict, days: int, price: int):
+    """Lưu thông tin Proxy đã mua"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # ===== THÊM DÒNG NÀY =====
+    # Ép kiểu order_id thành string (quan trọng!)
+    if isinstance(order_id, dict):
+        order_id = str(order_id.get('code', order_id.get('id', '')))
+    if not isinstance(order_id, str):
+        order_id = str(order_id)
+    # ========================
+    
+    # Lấy thông tin từ proxy_data
+    proxy_info = proxy_data.get('proxy', {})
+    ip_info = proxy_info.get('ipaddress', {})
+    
+    # ÉP KIỂU TẤT CẢ - QUAN TRỌNG: Chuyển dict thành string nếu cần
+    proxy_id = proxy_data.get('id')
+    if proxy_id is None:
+        proxy_id = 0
+    elif isinstance(proxy_id, dict):
+        proxy_id = str(proxy_id)
+    
+    proxy_code = proxy_data.get('code')
+    if proxy_code is None:
+        proxy_code = ''
+    elif isinstance(proxy_code, dict):
+        proxy_code = str(proxy_code)
+    
+    proxy_string = proxy_data.get('proxy')
+    if proxy_string is None:
+        proxy_string = ''
+    elif isinstance(proxy_string, dict):
+        proxy_string = str(proxy_string)
+    
+    protocol = proxy_data.get('protocol')
+    if protocol is None:
+        protocol = 'HTTP'
+    elif isinstance(protocol, dict):
+        protocol = str(protocol)
+    
+    ip = ip_info.get('ip')
+    if ip is None:
+        ip = ''
+    elif isinstance(ip, dict):
+        ip = str(ip)
+    
+    port = proxy_info.get('port')
+    if port is None:
+        port = 0
+    elif isinstance(port, dict):
+        port = 0
+    else:
+        try:
+            port = int(port)
+        except:
+            port = 0
+    
+    username = proxy_info.get('username')
+    if username is None:
+        username = ''
+    elif isinstance(username, dict):
+        username = str(username)
+    
+    password = proxy_info.get('password')
+    if password is None:
+        password = ''
+    elif isinstance(password, dict):
+        password = str(password)
+    
+    # XỬ LÝ rotate_interval
+    rotate_interval = proxy_info.get('rotateInterval', 0)
+    if isinstance(rotate_interval, dict):
+        rotate_interval = rotate_interval.get('value', 0)
+    try:
+        rotate_interval = int(rotate_interval)
+    except:
+        rotate_interval = 0
+    
+    provider = ip_info.get('provider', 'HOMEPROXY')
+    if isinstance(provider, dict):
+        provider = 'HOMEPROXY'
+    
+    location = ip_info.get('location')
+    if location and isinstance(location, dict):
+        location = str(location)
+    
+    expired_at = datetime.now(VIETNAM_TZ) + timedelta(days=days)
+    
+    # KIỂM TRA LẦN CUỐI
+    print(f"[DEBUG] order_id={order_id} (type: {type(order_id)})")
+    print(f"[DEBUG] proxy_code={proxy_code} (type: {type(proxy_code)})")
+    print(f"[DEBUG] proxy_string={proxy_string} (type: {type(proxy_string)})")
+    
+    c.execute("""
+        INSERT INTO proxy_purchases 
+        (user_id, order_id, proxy_id, proxy_code, proxy_string, protocol, ip, port, 
+         username, password, rotate_interval, provider, location, days, price, status, purchased_at, expired_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        user_id, order_id, proxy_id, proxy_code, proxy_string, protocol,
+        ip, port, username, password, rotate_interval, provider, location,
+        days, price, 'ACTIVE', datetime.now(VIETNAM_TZ).isoformat(), expired_at
+    ))
+    
+    conn.commit()
+    conn.close()
+    print(f"[DEBUG] Đã lưu proxy {proxy_code} - {ip}:{port}")
+
+def get_user_proxies(user_id: int, only_active: bool = True) -> List[dict]:
+    """Lấy danh sách Proxy của user từ database"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    if only_active:
+        # Chỉ lấy proxy còn hạn
+        c.execute("""
+            SELECT id, order_id, proxy_id, proxy_code, proxy_string, protocol, ip, port, 
+                   username, password, rotate_interval, provider, location, days, 
+                   price, status, purchased_at, expired_at
+            FROM proxy_purchases 
+            WHERE user_id = %s AND expired_at > NOW() AND status = 'ACTIVE'
+            ORDER BY id DESC
+        """, (user_id,))
+    else:
+        # Lấy tất cả (kể cả hết hạn)
+        c.execute("""
+            SELECT id, order_id, proxy_id, proxy_code, proxy_string, protocol, ip, port, 
+                   username, password, rotate_interval, provider, location, days, 
+                   price, status, purchased_at, expired_at
+            FROM proxy_purchases 
+            WHERE user_id = %s 
+            ORDER BY id DESC
+        """, (user_id,))
+    
+    proxies = c.fetchall()
+    conn.close()
+    
+    result = []
+    for p in proxies:
+        result.append({
+            'db_id': p[0], 'order_id': p[1], 'proxy_id': p[2], 'proxy_code': p[3],
+            'proxy_string': p[4], 'protocol': p[5], 'ip': p[6], 'port': p[7],
+            'username': p[8], 'password': p[9], 'rotate_interval': p[10],
+            'provider': p[11], 'location': p[12], 'days': p[13], 'price': p[14],
+            'status': p[15], 'purchased_at': p[16], 'expired_at': p[17]
+        })
+    return result
 # ==================== THUÊ OTP (OKEDA - 5 SITE) ====================
 import asyncio
 import aiohttp
@@ -2215,7 +3502,6 @@ async def otp_history_handler(call: CallbackQuery):
     except:
         pass
 
-# ==================== ADMIN ====================
 # ==================== CHAT ALL ====================
 @dp.message(Command("chatall"))
 async def chat_all(msg: Message, state: FSMContext):
@@ -2297,12 +3583,41 @@ async def admin_dash(call: CallbackQuery):
     total_sold = sum(sold.values())
     total_inv = sum(inv.values())
     
-    # Tính doanh thu OTP (lợi nhuận = 2820 - 1600 = 1220đ mỗi lần)
+    # Tính doanh thu OTP
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM otp_rentals WHERE status = 1")
     otp_success = c.fetchone()[0]
     otp_profit = otp_success * 920
+    
+    # ==================== THỐNG KÊ PROXY ====================
+    # Tổng số proxy đã bán
+    c.execute("SELECT COUNT(*), COALESCE(SUM(price), 0), COALESCE(SUM(days), 0) FROM proxy_purchases")
+    proxy_total_count, proxy_total_revenue, proxy_total_days = c.fetchone()
+    if proxy_total_count is None:
+        proxy_total_count = 0
+        proxy_total_revenue = 0
+        proxy_total_days = 0
+    
+    # Proxy còn hạn
+    c.execute("SELECT COUNT(*) FROM proxy_purchases WHERE expired_at > NOW()")
+    proxy_active_count = c.fetchone()[0]
+    if proxy_active_count is None:
+        proxy_active_count = 0
+    
+    # Proxy hôm nay
+    today = datetime.now(VIETNAM_TZ).date().isoformat()
+    c.execute("SELECT COUNT(*), COALESCE(SUM(price), 0), COALESCE(SUM(days), 0) FROM proxy_purchases WHERE DATE(purchased_at) = %s", (today,))
+    proxy_today_count, proxy_today_revenue, proxy_today_days = c.fetchone()
+    if proxy_today_count is None:
+        proxy_today_count = 0
+        proxy_today_revenue = 0
+        proxy_today_days = 0
+    
+    # Tính lợi nhuận proxy (giá bán - (số ngày x 4,000đ))
+    proxy_total_profit = proxy_total_revenue - (proxy_total_days * 4000)
+    proxy_today_profit = proxy_today_revenue - (proxy_today_days * 4000)
+    
     conn.close()
     
     text = f"""
@@ -2312,19 +3627,29 @@ async def admin_dash(call: CallbackQuery):
 • Tổng users: {user_count}
 • Users mới hôm nay: {daily['new_users']}
 
-💰 <b>Thống kê doanh thu acc:</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+💰 <b>Thống kê doanh thu ACC:</b>
 • Hôm nay: {daily['revenue']:,}đ ({daily['sales']} giao dịch)
 • Tổng doanh thu acc: {total_revenue:,}đ
 • Tổng acc đã bán: {total_sold}
 
+━━━━━━━━━━━━━━━━━━━━━━━
+🌐 <b>Thống kê PROXY:</b>
+• Hôm nay: {proxy_today_count} proxy | {proxy_today_revenue:,}đ ({proxy_today_days} ngày) | 📈 LN: {proxy_today_profit:,}đ
+• Tổng đã bán: {proxy_total_count} proxy | {proxy_total_revenue:,}đ ({proxy_total_days} ngày) | 📈 LN: {proxy_total_profit:,}đ
+• Đang hoạt động: {proxy_active_count} proxy
+
+━━━━━━━━━━━━━━━━━━━━━━━
 🔐 <b>Thống kê OTP:</b>
 • Số lần thuê thành công: {otp_success}
 • Lợi nhuận OTP: {otp_profit:,}đ
 
-📦 <b>Tồn kho:</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+📦 <b>Tồn kho ACC:</b>
 • Tổng acc còn: {total_inv}
 
-📋 <b>Chi tiết theo site:</b>
+━━━━━━━━━━━━━━━━━━━━━━━
+📋 <b>Chi tiết theo site ACC:</b>
 """
     for site in SITES:
         text += f"\n{SITE_EMOJI[site]} {site}: 📦{sold.get(site,0)} bán | ✅{inv.get(site,0)} còn | 💰{revenue.get(site,0):,}đ"
