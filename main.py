@@ -870,7 +870,12 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
             f"💰 Giá: {price:,}đ\n"
             f"💵 Số dư còn: {new_balance:,}đ\n"
             f"🆔 Mã đơn: {order_id}\n\n"
-            f"⚠️ Proxy đang được tạo, vui lòng kiểm tra lại sau bằng lệnh <b>/proxy_list</b>!"
+            f"⚠️ Proxy đang được tạo, vui lòng kiểm tra lại sau!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 XEM DANH SÁCH PROXY", callback_data="proxy_list")],
+                [InlineKeyboardButton(text="🛒 MUA TIẾP", callback_data="proxy_buy")],
+                [InlineKeyboardButton(text="🏠 MENU CHÍNH", callback_data="menu")]
+            ])
         )
     
     await state.clear()
