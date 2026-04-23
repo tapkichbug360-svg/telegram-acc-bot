@@ -197,14 +197,15 @@ def update_balance(telegram_id: int, amount: int, note: str = ""):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("UPDATE users SET balance = balance + %s WHERE telegram_id = %s", (amount, telegram_id))
+    
+    # KIỂM TRA CÓ PHẢI HOÀN TIỀN KHÔNG
+    is_refund = "hoàn tiền" in note.lower() or "hết 6 phút" in note.lower()
+    
     if amount > 0:
-        c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
-        
-        # KIỂM TRA CÓ PHẢI HOÀN TIỀN KHÔNG
-        is_refund = "hoàn tiền" in note.lower() or "hết 6 phút" in note.lower()
-        
-        # CHỈ TÍNH HOA HỒNG KHI KHÔNG PHẢI HOÀN TIỀN
+        # CHỈ CỘNG total_recharge VÀ TÍNH HOA HỒNG KHI KHÔNG PHẢI HOÀN TIỀN
         if not is_refund:
+            c.execute("UPDATE users SET total_recharge = total_recharge + %s WHERE telegram_id = %s", (amount, telegram_id))
+            
             # Tính hoa hồng 5% cho người giới thiệu
             c.execute("SELECT ref_by FROM users WHERE telegram_id = %s", (telegram_id,))
             ref_by = c.fetchone()
@@ -1137,9 +1138,9 @@ OKVIP_API_URL = "https://api.viotp.com"
 # ==================== CẤU HÌNH HupSMS ====================
 HUPSMS_API_KEY = "hup_MHaWCuF_3vWeYQdrnhQP1I4UEScX6XoZSoGKZ-ZJ1OS-ZEVd"
 HUPSMS_API_URL = "https://hupsms.com/api/v1"
-HUPSMS_PRICE = 2680  # Giá thuê SMS VIP
+HUPSMS_PRICE = 3000  # Giá thuê OTP Game
 HUPSMS_SERVER = 3  # Server 3
-HUPSMS_SERVICE_NAME = "Test 3"  # Dịch vụ Test 3
+HUPSMS_SERVICE_NAME = "OTP Game"  # Dịch vụ OTP Game
 # Service ID của Okeda (tự động lấy từ API)
 OKEDA_SERVICE_ID = None
 
@@ -1197,7 +1198,7 @@ def otp_service_menu():
         buttons.append(row)
     
     # Thêm dòng SMS VIP
-    buttons.append([InlineKeyboardButton(text=f"{SMS_VIP_EMOJI['SMS VIP']} SMS VIP (2680đ)", callback_data="sms_vip_buy")])
+    buttons.append([InlineKeyboardButton(text=f"{SMS_VIP_EMOJI['SMS VIP']} SMS VIP (3000đ)", callback_data="sms_vip_buy")])
     
     # Hàng cuối: 2 nút chức năng
     buttons.append([InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history"), InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
@@ -1473,7 +1474,7 @@ async def check_hupsms_loop(user_id: int, session_id: str, order_id: str, servic
                     # Gửi thông báo cho admin
                     # Trong check_hupsms_loop, khi gửi thông báo cho admin
                     for admin_id in ADMIN_IDS:
-                        profit = HUPSMS_PRICE - 2000  # 2680 - 2000 = 680đ
+                        profit = HUPSMS_PRICE - 2500  # 3000 - 2500 = 500đ
                         await bot.send_message(
                             admin_id,
                             f"🔐 <b>CÓ SMS VIP MỚI</b>\n\n"
@@ -1597,7 +1598,7 @@ async def sms_vip_rent_again_handler(call: CallbackQuery):
         otp_sessions[call.from_user.id] = []
     otp_sessions[call.from_user.id].append(session)
 
-    profit = rent_again_price - 2000  # 3600 - 2000 = 1600đ
+    profit = rent_again_price - 2500  # 3600 - 2500 = 1100đ
     for admin_id in ADMIN_IDS:
         await bot.send_message(
             admin_id,
