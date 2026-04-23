@@ -717,7 +717,7 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
     
     # Tự động tạo username và password
     auto_username = f"user_{call.from_user.id}_{random.randint(1000, 9999)}"
-    auto_password = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))  # 12 ký tự
+    auto_password = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
     
     await state.update_data(username=auto_username)
     await state.update_data(password=auto_password)
@@ -770,7 +770,7 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
         location=location, username=username, password=password
     )
     
-    # LẤY ORDER_ID TỪ 'code' (QUAN TRỌNG!)
+    # LẤY ORDER_ID TỪ 'code'
     order_id = order_result.get('code') or order_result.get('orderId')
     if not order_id:
         await processing_msg.edit_text(f"❌ Tạo đơn thất bại! Không có mã đơn hàng.")
@@ -782,11 +782,11 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
     # Trừ tiền
     update_balance(call.from_user.id, -price, f"Mua proxy {days} ngày - Đơn {order_id}")
     
-    # CHỜ 10 GIÂY CHO PROXY ĐƯỢC TẠO
+    # CHỜ 10 GIÂY
     await processing_msg.edit_text(f"⏳ Đơn hàng {order_id} đang được xử lý... Vui lòng chờ 10 giây.")
     await asyncio.sleep(10)
     
-    # Lấy lại danh sách proxy để tìm proxy mới
+    # Lấy lại danh sách proxy
     all_proxies = await get_user_proxies_api()
     found_proxy = None
     for p in all_proxies:
@@ -795,15 +795,6 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
             break
     
     if found_proxy:
-        # Debug trước khi lưu
-        print(f"[DEBUG] user_id={call.from_user.id}, order_id={order_id}, days={days}, price={price}")
-        print(f"[DEBUG] found_proxy type: {type(found_proxy)}")
-        if found_proxy:
-            print(f"[DEBUG] found_proxy keys: {list(found_proxy.keys())}")
-            proxy_info_debug = found_proxy.get('proxy', {})
-            print(f"[DEBUG] proxy_info keys: {list(proxy_info_debug.keys())}")
-            ip_info_debug = proxy_info_debug.get('ipaddress', {})
-            print(f"[DEBUG] ip_info keys: {list(ip_info_debug.keys())}")
         # Ép kiểu trước khi lưu
         clean_order_id = str(order_id) if order_id else ''
         clean_found_proxy = {
@@ -813,39 +804,40 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
             'protocol': found_proxy.get('protocol'),
         }
         save_proxy_purchase(call.from_user.id, clean_order_id, clean_found_proxy, days, price)
-    # ==================== GỬI THÔNG BÁO CHO ADMIN ====================
-    for admin_id in ADMIN_IDS:
-        try:
-            profit = price - 4000  # Lợi nhuận = 12,000 - 4,000 = 8,000đ
-            await bot.send_message(
-                admin_id,
-                f"🔄 <b>CÓ ĐƠN MUA PROXY MỚI</b>\n\n"
-                f"👤 <b>User:</b> <code>{call.from_user.id}</code>\n"
-                f"📝 <b>Tên:</b> {call.from_user.full_name}\n"
-                f"💬 <b>Username:</b> @{call.from_user.username or 'không có'}\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 <b>Số ngày:</b> {days} ngày\n"
-                f"💰 <b>Giá bán:</b> {price:,}đ\n"
-                f"💸 <b>Giá gốc:</b> 4,000đ\n"
-                f"📈 <b>Lợi nhuận:</b> <b>{profit:,}đ</b>\n"
-                f"🆔 <b>Mã đơn:</b> <code>{order_id}</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📡 <b>Nhà mạng:</b> {provider}\n"
-                f"📍 <b>Vị trí:</b> {location}\n"
-                f"🔄 <b>Xoay:</b> {rotate_interval} phút\n"
-                f"👤 <b>Username:</b> <code>{username}</code>\n"
-                f"🔑 <b>Password:</b> <code>{password}</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🌐 <b>IP:</b> <code>{ip_info.get('ip')}:{proxy_info.get('port')}</code>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 <b>Thời gian:</b> {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}"
-            )
-        except Exception as e:
-            print(f"Lỗi gửi thông báo admin: {e}")
-        new_balance = balance - price
         
+        new_balance = balance - price
         proxy_info = found_proxy.get('proxy', {})
         ip_info = proxy_info.get('ipaddress', {})
+        
+        # ==================== GỬI THÔNG BÁO CHO ADMIN ====================
+        for admin_id in ADMIN_IDS:
+            try:
+                profit = price - 4000
+                await bot.send_message(
+                    admin_id,
+                    f"🔄 <b>CÓ ĐƠN MUA PROXY MỚI</b>\n\n"
+                    f"👤 <b>User:</b> <code>{call.from_user.id}</code>\n"
+                    f"📝 <b>Tên:</b> {call.from_user.full_name}\n"
+                    f"💬 <b>Username:</b> @{call.from_user.username or 'không có'}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📅 <b>Số ngày:</b> {days} ngày\n"
+                    f"💰 <b>Giá bán:</b> {price:,}đ\n"
+                    f"💸 <b>Giá gốc:</b> 4,000đ\n"
+                    f"📈 <b>Lợi nhuận:</b> <b>{profit:,}đ</b>\n"
+                    f"🆔 <b>Mã đơn:</b> <code>{order_id}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📡 <b>Nhà mạng:</b> {provider}\n"
+                    f"📍 <b>Vị trí:</b> {location}\n"
+                    f"🔄 <b>Xoay:</b> {rotate_interval} phút\n"
+                    f"👤 <b>Username:</b> <code>{username}</code>\n"
+                    f"🔑 <b>Password:</b> <code>{password}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🌐 <b>IP:</b> <code>{ip_info.get('ip')}:{proxy_info.get('port')}</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📅 <b>Thời gian:</b> {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}"
+                )
+            except Exception as e:
+                print(f"Lỗi gửi thông báo admin: {e}")
         
         await processing_msg.edit_text(
             f"✅ <b>MUA PROXY THÀNH CÔNG!</b>\n\n"
@@ -864,6 +856,7 @@ async def proxy_select_location(call: CallbackQuery, state: FSMContext):
             ])
         )
     else:
+        new_balance = balance - price  # ← THÊM DÒNG NÀY
         await processing_msg.edit_text(
             f"✅ <b>ĐÃ TẠO ĐƠN HÀNG THÀNH CÔNG!</b>\n\n"
             f"📅 Số ngày: {days} ngày\n"
