@@ -619,7 +619,6 @@ async def handle_proxy_menu(msg: Message):
             [InlineKeyboardButton(text="🛒 MUA PROXY MỚI", callback_data="proxy_buy")],
             [InlineKeyboardButton(text="📋 DANH SÁCH PROXY", callback_data="proxy_list")],
             [InlineKeyboardButton(text="🔄 XOAY IP", callback_data="proxy_rotate")],
-            [InlineKeyboardButton(text="⏰ GIA HẠN", callback_data="proxy_renew")],
             [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
         ])
     )
@@ -648,7 +647,6 @@ async def proxy_back_menu(call: CallbackQuery):
             [InlineKeyboardButton(text="🛒 MUA PROXY", callback_data="proxy_buy")],
             [InlineKeyboardButton(text="📋 DANH SÁCH PROXY", callback_data="proxy_list")],
             [InlineKeyboardButton(text="🔄 XOAY IP", callback_data="proxy_rotate")],
-            [InlineKeyboardButton(text="⏰ GIA HẠN", callback_data="proxy_renew")],
             [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
         ])
     )
@@ -969,55 +967,6 @@ async def proxy_select_rotate(call: CallbackQuery, state: FSMContext):
     
     await state.clear()
 
-@dp.callback_query(F.data.startswith("proxy_detail_"))
-async def proxy_detail_handler(call: CallbackQuery):
-    """Xem chi tiết 1 proxy"""
-    db_id = int(call.data.split("_")[2])
-    proxies = get_user_proxies(call.from_user.id)
-    proxy = next((p for p in proxies if p['db_id'] == db_id), None)
-    
-    if not proxy:
-        await call.answer("❌ Không tìm thấy proxy!", show_alert=True)
-        return
-    
-    # Format ngày hết hạn
-    expired_str = "Không rõ"
-    is_expired_flag = False
-    
-    if proxy['expired_at']:
-        try:
-            expired = normalize_datetime(proxy['expired_at'])
-            if expired:
-                expired_str = expired.strftime('%d/%m/%Y %H:%M')
-                if expired < datetime.now(VIETNAM_TZ):
-                    is_expired_flag = True
-        except Exception:
-            expired_str = str(proxy['expired_at'])[:16] if proxy['expired_at'] else "Không rõ"
-    
-    status_text = "✅ Đang hoạt động" if not is_expired_flag and proxy['status'] == 'ACTIVE' else "⚠️ Đã hết hạn"
-    
-    text = f"""
-📡 <b>CHI TIẾT PROXY #{proxy['db_id']}</b>
-
-🌐 <b>IP:</b> <code>{proxy['ip']}:{proxy['port']}</code>
-🔗 <b>Proxy:</b> <code>{proxy['proxy_string']}</code>
-👤 <b>Username:</b> <code>{proxy['username']}</code>
-🔑 <b>Password:</b> <code>{proxy['password']}</code>
-📡 <b>Nhà mạng:</b> {proxy['provider']}
-📍 <b>Vị trí:</b> {proxy['location'] or 'Random'}
-🔄 <b>Xoay IP:</b> {proxy['rotate_interval']} phút
-📅 <b>Ngày mua:</b> {proxy['purchased_at'][:19] if proxy['purchased_at'] else 'Không rõ'}
-⏰ <b>Hết hạn:</b> {expired_str}
-💰 <b>Giá:</b> {proxy['price']:,}đ
-📊 <b>Trạng thái:</b> {status_text}
-"""
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 XOAY IP", callback_data=f"proxy_do_rotate_{proxy['proxy_id']}")],
-        [InlineKeyboardButton(text="✏️ ĐỔI MK", callback_data=f"proxy_select_change_{proxy['db_id']}")],
-        [InlineKeyboardButton(text="⏰ GIA HẠN", callback_data=f"proxy_select_renew_{proxy['db_id']}")],
-        [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_list")]
-    ]))
-
 @dp.callback_query(F.data == "noop")
 async def noop_handler(call: CallbackQuery):
     """Handler cho nút trang trí"""
@@ -1132,7 +1081,6 @@ async def proxy_list(call: CallbackQuery):
         # Nút chức năng cho từng proxy
         buttons.append([
             InlineKeyboardButton(text=f"🔄 XOAY #{i}", callback_data=f"proxy_do_rotate_{p['proxy_id']}"),
-            InlineKeyboardButton(text=f"⏰ GIA HẠN #{i}", callback_data=f"proxy_select_renew_{p['db_id']}")
         ])
     
     # Nút chức năng chung
@@ -1251,162 +1199,6 @@ async def proxy_do_rotate(call: CallbackQuery):
                 [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
             ])
         )
-
-# ==================== PROXY GIA HẠN ====================
-@dp.callback_query(F.data == "proxy_renew")
-async def proxy_renew_menu(call: CallbackQuery, state: FSMContext):
-    """Hiển thị danh sách proxy để gia hạn (chỉ proxy còn hạn)"""
-    # Chỉ lấy proxy còn hạn
-    proxies = get_user_proxies(call.from_user.id, only_active=True)
-    
-    if not proxies:
-        await call.message.edit_text(
-            "📭 Bạn chưa có proxy nào để gia hạn!",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🛒 MUA PROXY", callback_data="proxy_buy")],
-                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
-            ])
-        )
-        return
-    
-    text = "⏰ <b>GIA HẠN PROXY</b>\n\n"
-    text += f"💰 <b>Giá gia hạn:</b> {PROXY_PRICE_PER_DAY:,}đ/ngày\n"
-    text += "📅 <b>Các gói gia hạn:</b> 1 ngày, 7 ngày, 30 ngày, 90 ngày\n\n"
-    text += "Chọn proxy cần gia hạn:\n\n"
-    
-    buttons = []
-    for i, p in enumerate(proxies[:10], 1):
-        # Định dạng ngày hết hạn (chỉ hiển thị, tất cả đều còn hạn)
-        expired_str = "Không rõ"
-        
-        if p['expired_at']:
-            try:
-                expired = normalize_datetime(p['expired_at'])
-                if expired:
-                    # Chuyển về UTC để so sánh
-                    if expired.tzinfo:
-                        expired_utc = expired.astimezone(pytz.UTC)
-                    else:
-                        expired_utc = expired
-                    
-                    # Chuyển về VN để hiển thị (giống web)
-                    expired_vn = expired_utc.astimezone(VIETNAM_TZ)
-                    expired_str = expired_vn.strftime('%d/%m/%Y %H:%M:%S')
-            except Exception:
-                expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
-        
-        text += f"✅ <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
-        text += f"   📅 Hết hạn: {expired_str}\n\n"
-        
-        buttons.append([InlineKeyboardButton(
-            text=f"⏰ Gia hạn Proxy #{i}",
-            callback_data=f"proxy_select_renew_{p['db_id']}"
-        )])
-    
-    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")])
-    
-    final_text = text + "👇 <b>Chọn proxy cần gia hạn:</b>"
-    await call.message.edit_text(final_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@dp.callback_query(F.data.startswith("proxy_select_renew_"))
-async def proxy_select_renew(call: CallbackQuery, state: FSMContext):
-    """Chọn proxy để gia hạn"""
-    db_id = int(call.data.split("_")[3])
-    await state.update_data(proxy_db_id=db_id)
-    
-    await call.message.edit_text(
-        "⏰ <b>NHẬP SỐ NGÀY GIA HẠN</b>\n\n"
-        f"💰 Giá: {PROXY_PRICE_PER_DAY:,}đ/ngày\n\n"
-        "Nhập số ngày muốn gia hạn (1, 7, 30, 90):\n\n"
-        "Gửi /cancel để hủy"
-    )
-    await state.set_state(ProxyState.waiting_for_renew_days)
-
-@dp.message(ProxyState.waiting_for_renew_days)
-async def proxy_do_renew(msg: Message, state: FSMContext):
-    """Thực hiện gia hạn"""
-    try:
-        days = int(msg.text.strip())
-        if days not in [1, 7, 30, 90]:
-            await msg.answer("❌ Số ngày không hợp lệ! Vui lòng chọn: 1, 7, 30, 90")
-            return
-        
-        data = await state.get_data()
-        db_id = data.get('proxy_db_id')
-        
-        # Lấy thông tin proxy
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT proxy_id, price FROM proxy_purchases WHERE id = %s AND user_id = %s", (db_id, msg.from_user.id))
-        result = c.fetchone()
-        
-        if not result:
-            await msg.answer("❌ Không tìm thấy proxy!")
-            await state.clear()
-            conn.close()
-            return
-        
-        proxy_id = result[0]
-        old_price = result[1]
-        conn.close()
-        
-        # Tính giá gia hạn
-        renew_price = days * PROXY_PRICE_PER_DAY
-        
-        # Kiểm tra số dư
-        user = get_user(msg.from_user.id)
-        balance = user[3] if user and isinstance(user[3], int) else 0
-        
-        if balance < renew_price:
-            await msg.answer(
-                f"❌ <b>SỐ DƯ KHÔNG ĐỦ!</b>\n\n"
-                f"💰 Cần: {renew_price:,}đ\n"
-                f"💵 Bạn có: {balance:,}đ\n\n"
-                f"Vui lòng nạp thêm tiền!"
-            )
-            await state.clear()
-            return
-        
-        await msg.answer("🔄 Đang gia hạn proxy...")
-        
-        # Gọi API gia hạn
-        result_api = await renew_proxies([proxy_id], days)
-        
-        if result_api.get('success'):
-            # Trừ tiền
-            update_balance(msg.from_user.id, -renew_price, f"Gia hạn proxy {days} ngày")
-            
-            # Cập nhật database
-            conn = get_db_connection()
-            c = conn.cursor()
-            c.execute("""
-                UPDATE proxy_purchases 
-                SET days = days + %s, 
-                    price = price + %s,
-                    expired_at = expired_at + INTERVAL '%s days',
-                    status = 'ACTIVE'
-                WHERE id = %s
-            """, (days, renew_price, days, db_id))
-            conn.commit()
-            conn.close()
-            
-            await msg.answer(
-                f"✅ <b>GIA HẠN THÀNH CÔNG!</b>\n\n"
-                f"📅 Gia hạn: {days} ngày\n"
-                f"💰 Phí: {renew_price:,}đ\n"
-                f"💵 Số dư còn: {balance - renew_price:,}đ",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📋 Danh sách proxy", callback_data="proxy_list")],
-                    [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
-                ])
-            )
-        else:
-            await msg.answer("❌ Gia hạn thất bại! Vui lòng thử lại sau.")
-        
-        await state.clear()
-        
-    except ValueError:
-        await msg.answer("❌ Vui lòng nhập số ngày hợp lệ!")
 @dp.message(Command("buy_proxy"))
 async def cmd_buy_proxy(msg: Message, state: FSMContext):
     """Lệnh nhanh mua proxy"""
@@ -1419,85 +1211,6 @@ async def cmd_buy_proxy(msg: Message, state: FSMContext):
         message=msg
     )
     await proxy_buy(fake_call, state)
-@dp.message(Command("renew"))
-async def cmd_renew_proxy(msg: Message, state: FSMContext):
-    """Lệnh nhanh gia hạn: /renew <proxy_id> <số_ngày>"""
-    args = msg.text.split()
-    if len(args) < 3:
-        await msg.answer(
-            "❌ Sai format!\n"
-            "Dùng: <code>/renew proxy_id số_ngày</code>\n"
-            "Ví dụ: <code>/renew 12345 7</code>\n\n"
-            "📋 Xem danh sách proxy với lệnh <code>/proxy_list</code>\n"
-            "📅 Số ngày có thể: 1, 7, 30, 90"
-        )
-        return
-    
-    try:
-        proxy_id = int(args[1])
-        days = int(args[2])
-        
-        if days not in [1, 7, 30, 90]:
-            await msg.answer("❌ Số ngày không hợp lệ! Vui lòng chọn: 1, 7, 30, 90")
-            return
-        
-        # Tìm proxy
-        proxies = get_user_proxies(msg.from_user.id)
-        proxy = next((p for p in proxies if p['proxy_id'] == proxy_id), None)
-        
-        if not proxy:
-            await msg.answer(f"❌ Không tìm thấy proxy ID {proxy_id} hoặc không phải của bạn!")
-            return
-        
-        renew_price = days * PROXY_PRICE_PER_DAY
-        
-        # Kiểm tra số dư
-        user = get_user(msg.from_user.id)
-        balance = user[3] if user and isinstance(user[3], int) else 0
-        
-        if balance < renew_price:
-            await msg.answer(
-                f"❌ <b>SỐ DƯ KHÔNG ĐỦ!</b>\n\n"
-                f"💰 Cần: {renew_price:,}đ\n"
-                f"💵 Bạn có: {balance:,}đ"
-            )
-            return
-        
-        status_msg = await msg.answer(f"🔄 Đang gia hạn proxy #{proxy_id} thêm {days} ngày...")
-        
-        # Gọi API gia hạn
-        result_api = await renew_proxies([proxy_id], days)
-        
-        if result_api.get('success'):
-            # Trừ tiền
-            update_balance(msg.from_user.id, -renew_price, f"Gia hạn proxy {days} ngày")
-            
-            # Cập nhật database
-            conn = get_db_connection()
-            c = conn.cursor()
-            c.execute("""
-                UPDATE proxy_purchases 
-                SET days = days + %s, 
-                    price = price + %s,
-                    expired_at = expired_at + INTERVAL '%s days',
-                    status = 'ACTIVE'
-                WHERE proxy_id = %s AND user_id = %s
-            """, (days, renew_price, days, proxy_id, msg.from_user.id))
-            conn.commit()
-            conn.close()
-            
-            await status_msg.edit_text(
-                f"✅ <b>GIA HẠN THÀNH CÔNG!</b>\n\n"
-                f"🆔 Proxy ID: {proxy_id}\n"
-                f"📅 Gia hạn: {days} ngày\n"
-                f"💰 Phí: {renew_price:,}đ\n"
-                f"💵 Số dư còn: {balance - renew_price:,}đ"
-            )
-        else:
-            await status_msg.edit_text("❌ Gia hạn thất bại! Vui lòng thử lại sau.")
-        
-    except ValueError:
-        await msg.answer("❌ Proxy ID và số ngày phải là số!")
 
 def admin_menu():
     return ReplyKeyboardMarkup(
