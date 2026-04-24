@@ -1144,12 +1144,13 @@ async def proxy_list(call: CallbackQuery):
 # ==================== PROXY XOAY IP ====================
 @dp.callback_query(F.data == "proxy_rotate")
 async def proxy_rotate_menu(call: CallbackQuery, state: FSMContext):
-    """Hiển thị danh sách proxy để chọn xoay IP"""
-    proxies = get_user_proxies(call.from_user.id)
+    """Hiển thị danh sách proxy để chọn xoay IP (chỉ proxy còn hạn)"""
+    # Chỉ lấy proxy còn hạn
+    proxies = get_user_proxies(call.from_user.id, only_active=True)
     
     if not proxies:
         await call.message.edit_text(
-            "📭 Bạn chưa có proxy nào để xoay IP!\n\n🛒 Hãy mua proxy trước.",
+            "📭 Bạn không có proxy nào còn hạn để xoay IP!\n\n🛒 Hãy mua proxy trước.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🛒 MUA PROXY", callback_data="proxy_buy")],
                 [InlineKeyboardButton(text="🔙 Quay lại", callback_data="proxy_menu")]
@@ -1162,18 +1163,9 @@ async def proxy_rotate_menu(call: CallbackQuery, state: FSMContext):
     
     buttons = []
     for i, p in enumerate(proxies[:10], 1):
-        # Kiểm tra còn hạn không
-        is_expired_flag = is_expired(p['expired_at'])
-        is_active = not is_expired_flag and p['status'] == 'ACTIVE'
-        
-        status_icon = "✅" if is_active else "❌"
-        
-        text += f"{status_icon} <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
-        if not is_active:
-            text += f"   ⚠️ Proxy đã hết hạn, vui lòng gia hạn trước khi xoay IP\n"
-        
+        text += f"✅ <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
         buttons.append([InlineKeyboardButton(
-            text=f"{status_icon} Xoay Proxy #{i} - {p['ip']}:{p['port']}",
+            text=f"🔄 Xoay Proxy #{i} - {p['ip']}:{p['port']}",
             callback_data=f"proxy_do_rotate_{p['proxy_id']}"
         )])
     
@@ -1263,8 +1255,9 @@ async def proxy_do_rotate(call: CallbackQuery):
 # ==================== PROXY GIA HẠN ====================
 @dp.callback_query(F.data == "proxy_renew")
 async def proxy_renew_menu(call: CallbackQuery, state: FSMContext):
-    """Hiển thị danh sách proxy để gia hạn"""
-    proxies = get_user_proxies(call.from_user.id)
+    """Hiển thị danh sách proxy để gia hạn (chỉ proxy còn hạn)"""
+    # Chỉ lấy proxy còn hạn
+    proxies = get_user_proxies(call.from_user.id, only_active=True)
     
     if not proxies:
         await call.message.edit_text(
@@ -1283,38 +1276,27 @@ async def proxy_renew_menu(call: CallbackQuery, state: FSMContext):
     
     buttons = []
     for i, p in enumerate(proxies[:10], 1):
-        # Định dạng ngày hết hạn
+        # Định dạng ngày hết hạn (chỉ hiển thị, tất cả đều còn hạn)
         expired_str = "Không rõ"
-        status_icon = "❓"
-        status_text = "Không rõ"
         
-    if p['expired_at']:
-        try:
-            expired = normalize_datetime(p['expired_at'])
-            if expired:
-                # Chuyển về UTC để so sánh
-                if expired.tzinfo:
-                    expired_utc = expired.astimezone(pytz.UTC)
-                else:
-                    expired_utc = expired
-                
-                # Chuyển về VN để hiển thị (giống web)
-                expired_vn = expired_utc.astimezone(VIETNAM_TZ)
-                expired_str = expired_vn.strftime('%d/%m/%Y %H:%M:%S')
-                
-                # So sánh với UTC
-                now_utc = datetime.now(pytz.UTC)
-                if expired_utc > now_utc:
-                    status_icon = "✅"
-                    status_text = "Còn hạn"
-                else:
-                    status_icon = "❌"
-                    status_text = "Hết hạn"
-        except Exception:
-            expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
+        if p['expired_at']:
+            try:
+                expired = normalize_datetime(p['expired_at'])
+                if expired:
+                    # Chuyển về UTC để so sánh
+                    if expired.tzinfo:
+                        expired_utc = expired.astimezone(pytz.UTC)
+                    else:
+                        expired_utc = expired
+                    
+                    # Chuyển về VN để hiển thị (giống web)
+                    expired_vn = expired_utc.astimezone(VIETNAM_TZ)
+                    expired_str = expired_vn.strftime('%d/%m/%Y %H:%M:%S')
+            except Exception:
+                expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
         
-        text += f"{status_icon} <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
-        text += f"   📅 Hết hạn: {expired_str} | {status_text}\n\n"
+        text += f"✅ <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
+        text += f"   📅 Hết hạn: {expired_str}\n\n"
         
         buttons.append([InlineKeyboardButton(
             text=f"⏰ Gia hạn Proxy #{i}",
