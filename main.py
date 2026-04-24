@@ -22,34 +22,34 @@ from aiogram.client.default import DefaultBotProperties
 
 # ==================== HELPER FUNCTIONS ====================
 def normalize_datetime(dt):
-    """Chuyển đổi datetime về dạng có timezone"""
+    """Chuyển đổi datetime về dạng UTC có timezone"""
     if dt is None:
         return None
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
-            return VIETNAM_TZ.localize(dt)
-        return dt.astimezone(VIETNAM_TZ)
+            return pytz.UTC.localize(dt)  # ← SỬA: dùng UTC thay vì VIETNAM_TZ
+        return dt.astimezone(pytz.UTC)    # ← SỬA: chuyển về UTC
     return dt
 
 def is_expired(expired_at):
-    """Kiểm tra proxy đã hết hạn chưa"""
+    """Kiểm tra proxy đã hết hạn chưa (so sánh UTC)"""
     if not expired_at:
         return False
     try:
         expired = normalize_datetime(expired_at)
-        if expired and expired < datetime.now(VIETNAM_TZ):
+        if expired and expired < datetime.now(pytz.UTC):  # ← SỬA: so sánh với UTC
             return True
     except Exception as e:
         print(f"Lỗi kiểm tra expired: {e}")
     return False
 
 def is_active_proxy(expired_at):
-    """Kiểm tra proxy còn hạn không"""
+    """Kiểm tra proxy còn hạn không (so sánh UTC)"""
     if not expired_at:
         return True
     try:
         expired = normalize_datetime(expired_at)
-        if expired and expired > datetime.now(VIETNAM_TZ):
+        if expired and expired > datetime.now(pytz.UTC):  # ← SỬA: so sánh với UTC
             return True
     except Exception as e:
         print(f"Lỗi kiểm tra active: {e}")
@@ -1068,7 +1068,7 @@ async def cmd_rotate_proxy(msg: Message):
 @dp.callback_query(F.data == "proxy_list")
 async def proxy_list(call: CallbackQuery):
     """Xem danh sách proxy đã mua"""
-    proxies = get_user_proxies(call.from_user.id)
+    proxies = get_user_proxies(call.from_user.id, only_active=True)
     
     if not proxies:
         await call.message.edit_text(
@@ -1097,12 +1097,23 @@ async def proxy_list(call: CallbackQuery):
         status_icon = "❓"
         status_text = "Không rõ"
         
-        if p['expired_at']:
+        if p['expired_at']:  # ← Dòng này phải thụt vào trong for
             try:
                 expired = normalize_datetime(p['expired_at'])
                 if expired:
-                    expired_str = expired.strftime('%d/%m/%Y')
-                    if expired > datetime.now(VIETNAM_TZ):
+                    # Chuyển về UTC để so sánh
+                    if expired.tzinfo:
+                        expired_utc = expired.astimezone(pytz.UTC)
+                    else:
+                        expired_utc = expired
+                    
+                    # Chuyển về VN để hiển thị (giống web)
+                    expired_vn = expired_utc.astimezone(VIETNAM_TZ)
+                    expired_str = expired_vn.strftime('%d/%m/%Y %H:%M:%S')
+                    
+                    # So sánh với UTC
+                    now_utc = datetime.now(pytz.UTC)
+                    if expired_utc > now_utc:
                         status_icon = "✅"
                         status_text = "Còn hạn"
                     else:
@@ -1277,19 +1288,30 @@ async def proxy_renew_menu(call: CallbackQuery, state: FSMContext):
         status_icon = "❓"
         status_text = "Không rõ"
         
-        if p['expired_at']:
-            try:
-                expired = normalize_datetime(p['expired_at'])
-                if expired:
-                    expired_str = expired.strftime('%d/%m/%Y')
-                    if expired > datetime.now(VIETNAM_TZ):
-                        status_icon = "✅"
-                        status_text = "Còn hạn"
-                    else:
-                        status_icon = "⚠️"
-                        status_text = "ĐÃ HẾT HẠN"
-            except Exception:
-                expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
+    if p['expired_at']:
+        try:
+            expired = normalize_datetime(p['expired_at'])
+            if expired:
+                # Chuyển về UTC để so sánh
+                if expired.tzinfo:
+                    expired_utc = expired.astimezone(pytz.UTC)
+                else:
+                    expired_utc = expired
+                
+                # Chuyển về VN để hiển thị (giống web)
+                expired_vn = expired_utc.astimezone(VIETNAM_TZ)
+                expired_str = expired_vn.strftime('%d/%m/%Y %H:%M:%S')
+                
+                # So sánh với UTC
+                now_utc = datetime.now(pytz.UTC)
+                if expired_utc > now_utc:
+                    status_icon = "✅"
+                    status_text = "Còn hạn"
+                else:
+                    status_icon = "❌"
+                    status_text = "Hết hạn"
+        except Exception:
+            expired_str = str(p['expired_at'])[:10] if p['expired_at'] else "Không rõ"
         
         text += f"{status_icon} <b>Proxy #{i}</b> - {p['ip']}:{p['port']}\n"
         text += f"   📅 Hết hạn: {expired_str} | {status_text}\n\n"
@@ -2268,19 +2290,27 @@ def save_proxy_purchase(user_id: int, order_id: str, proxy_data: dict, days: int
     conn = get_db_connection()
     c = conn.cursor()
     
-    # ===== THÊM DÒNG NÀY =====
-    # Ép kiểu order_id thành string (quan trọng!)
+    # Ép kiểu order_id thành string
     if isinstance(order_id, dict):
         order_id = str(order_id.get('code', order_id.get('id', '')))
     if not isinstance(order_id, str):
         order_id = str(order_id)
-    # ========================
     
     # Lấy thông tin từ proxy_data
     proxy_info = proxy_data.get('proxy', {})
     ip_info = proxy_info.get('ipaddress', {})
     
-    # ÉP KIỂU TẤT CẢ - QUAN TRỌNG: Chuyển dict thành string nếu cần
+    # Lấy expiredAt từ API nếu có (milliseconds)
+    expired_at_ms = proxy_data.get('expiredAt')
+    if expired_at_ms:
+        expired_at = datetime.fromtimestamp(expired_at_ms / 1000, tz=pytz.UTC)
+    else:
+        expired_at = datetime.now(pytz.UTC) + timedelta(days=days)
+    
+    # purchased_at dùng UTC
+    purchased_at = datetime.now(pytz.UTC)
+    
+    # Các trường khác
     proxy_id = proxy_data.get('id')
     if proxy_id is None:
         proxy_id = 0
@@ -2351,13 +2381,6 @@ def save_proxy_purchase(user_id: int, order_id: str, proxy_data: dict, days: int
     if location and isinstance(location, dict):
         location = str(location)
     
-    expired_at = datetime.now(VIETNAM_TZ) + timedelta(days=days)
-    
-    # KIỂM TRA LẦN CUỐI
-    print(f"[DEBUG] order_id={order_id} (type: {type(order_id)})")
-    print(f"[DEBUG] proxy_code={proxy_code} (type: {type(proxy_code)})")
-    print(f"[DEBUG] proxy_string={proxy_string} (type: {type(proxy_string)})")
-    
     c.execute("""
         INSERT INTO proxy_purchases 
         (user_id, order_id, proxy_id, proxy_code, proxy_string, protocol, ip, port, 
@@ -2366,14 +2389,14 @@ def save_proxy_purchase(user_id: int, order_id: str, proxy_data: dict, days: int
     """, (
         user_id, order_id, proxy_id, proxy_code, proxy_string, protocol,
         ip, port, username, password, rotate_interval, provider, location,
-        days, price, 'ACTIVE', datetime.now(VIETNAM_TZ).isoformat(), expired_at
+        days, price, 'ACTIVE', purchased_at.isoformat(), expired_at
     ))
     
     conn.commit()
     conn.close()
     print(f"[DEBUG] Đã lưu proxy {proxy_code} - {ip}:{port}")
 
-def get_user_proxies(user_id: int, only_active: bool = True) -> List[dict]:
+def get_user_proxies(user_id: int, only_active: bool = False) -> List[dict]:
     """Lấy danh sách Proxy của user từ database"""
     conn = get_db_connection()
     c = conn.cursor()
