@@ -19,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BufferedInputFile
 
 # ==================== HELPER FUNCTIONS ====================
 def normalize_datetime(dt):
@@ -1261,12 +1262,23 @@ async def handle_otp(msg: Message):
     conn.close()
     
     text = f"""
-🔐 <b>THUÊ OTP</b>
+🔐 <b>THUÊ OTP GAME</b>
 
-💰 <b>Giá mỗi số:</b> {OTP_PRICE:,}đ
+💰 <b>Giá mỗi số:</b> 2,750đ
+⏱️ <b>Thời gian chờ:</b> Tối đa 6 phút
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+📋 <b>HƯỚNG DẪN:</b>
+• Chọn site cần nhận OTP bên dưới
+• Sau khi thuê sẽ nhận được số điện thoại
+• Hệ thống tự động kiểm tra OTP mỗi 2 giây
+• Mã OTP sẽ được gửi ngay khi có (kèm audio nếu là OTP call)
+• <b>Tự động hoàn tiền 100% sau 6 phút</b> nếu không nhận được OTP
+━━━━━━━━━━━━━━━━━━━━━━━━
+
 📱 <b>Đang thuê:</b> {active_count} số
 
-📋 <b>Chọn dịch vụ:</b>
+👇 <b>Chọn dịch vụ:</b>
 """
     await msg.answer(text, reply_markup=otp_service_menu())
 
@@ -2130,81 +2142,83 @@ def get_user_proxies(user_id: int, only_active: bool = False) -> List[dict]:
             'status': p[15], 'purchased_at': p[16], 'expired_at': p[17]
         })
     return result
-# ==================== THUÊ OTP (OKEDA - 5 SITE) ====================
+# ==================== THUÊ OTP (HUPSMS - 5 SITE) ====================
 import asyncio
 import aiohttp
 import json
 
-# Cấu hình OKVIP API
-OKVIP_TOKEN = "239e39474dfb4e72903ff527c2b26d46"
-OKVIP_API_URL = "https://api.viotp.com"
-# ==================== CẤU HÌNH HupSMS ====================
+# Cấu hình HupSMS API
 HUPSMS_API_KEY = "hup_MHaWCuF_3vWeYQdrnhQP1I4UEScX6XoZSoGKZ-ZJ1OS-ZEVd"
 HUPSMS_API_URL = "https://hupsms.com/api/v1"
-HUPSMS_PRICE = 3000  # Giá thuê OTP Game
+HUPSMS_PRICE = 2750  # Giá thuê OTP
 HUPSMS_SERVER = 3  # Server 3
 HUPSMS_SERVICE_NAME = "OTP Game"  # Dịch vụ OTP Game
-# Service ID của Okeda (tự động lấy từ API)
-OKEDA_SERVICE_ID = None
+# Service ID (tự động lấy từ API)
+HUPSMS_SERVICE_ID = None
 
-# Giá thuê OTP
-OTP_PRICE = 2520
-
-# Danh sách 5 dịch vụ (chỉ để hiển thị, tất cả đều dùng OKEDA)
+# Danh sách 5 dịch vụ
 OTP_SERVICES = ["CM88", "SC88", "FLY88", "F168", "C168"]
 OTP_SERVICE_EMOJI = {"CM88": "🎰", "SC88": "🎲", "FLY88": "✈️", "F168": "🏆", "C168": "🃏"}
 
-# Dịch vụ SMS VIP (riêng)
-SMS_VIP_SERVICES = ["SMS VIP"]
-SMS_VIP_EMOJI = {"SMS VIP": "💎"}
-
-# Lưu trữ nhiều phiên thuê OTP (cho phép nhiều số cùng lúc)
-# Cấu trúc: {user_id: [session1, session2, ...]}
+# Lưu trữ nhiều phiên thuê OTP
 otp_sessions = {}
 
-async def call_viotp_api(endpoint: str, params: dict = None) -> dict:
-    """Gọi API ViOTP"""
+async def call_hupsms_api(endpoint: str, params: dict = None) -> dict:
+    """Gọi API HupSMS"""
     if params is None:
         params = {}
-    params['token'] = OKVIP_TOKEN
-    url = f"{OKVIP_API_URL}/{endpoint}"
+    params['api_key'] = HUPSMS_API_KEY
+    url = f"{HUPSMS_API_URL}/{endpoint}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             return await resp.json()
 
-async def get_okeda_service_id() -> int:
-    """Lấy service ID của Okeda từ API"""
-    global OKEDA_SERVICE_ID
-    if OKEDA_SERVICE_ID:
-        return OKEDA_SERVICE_ID
+async def get_hupsms_service_id() -> int:
+    """Lấy service ID của OTP Game từ HupSMS"""
+    global HUPSMS_SERVICE_ID
+    if HUPSMS_SERVICE_ID:
+        return HUPSMS_SERVICE_ID
     
-    result = await call_viotp_api("service/getv2", {"country": "vn"})
-    if result.get('success'):
+    result = await call_hupsms_api("services", {"server": HUPSMS_SERVER})
+    if result.get('status') == 'success':
         services = result.get('data', [])
         for sv in services:
-            if 'okeda' in sv.get('name', '').lower():
-                OKEDA_SERVICE_ID = sv.get('id')
-                print(f"✅ Tìm thấy OKEDA Service ID: {OKEDA_SERVICE_ID}")
-                return OKEDA_SERVICE_ID
-    print("❌ Không tìm thấy OKEDA trong danh sách dịch vụ")
+            if HUPSMS_SERVICE_NAME.lower() in sv.get('name', '').lower():
+                HUPSMS_SERVICE_ID = sv.get('id')
+                print(f"✅ Tìm thấy Service ID: {HUPSMS_SERVICE_ID}")
+                return HUPSMS_SERVICE_ID
+        
+        # Fallback: lấy service đầu tiên
+        if services:
+            HUPSMS_SERVICE_ID = services[0].get('id')
+            print(f"⚠️ Dùng service mặc định: {HUPSMS_SERVICE_ID}")
+            return HUPSMS_SERVICE_ID
+    
+    print("❌ Không tìm thấy service OTP Game từ HupSMS")
     return None
 
 def otp_service_menu():
-    """Menu chọn dịch vụ OTP và SMS VIP"""
+    """Menu chọn 5 dịch vụ OTP (giá 2,750đ)"""
     buttons = []
-    # Các dịch vụ OTP thường
-    for i in range(0, len(OTP_SERVICES), 2):
-        row = []
-        row.append(InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[OTP_SERVICES[i]]} {OTP_SERVICES[i]}", callback_data=f"otp_buy_{OTP_SERVICES[i]}"))
-        if i + 1 < len(OTP_SERVICES):
-            row.append(InlineKeyboardButton(text=f"{OTP_SERVICE_EMOJI[OTP_SERVICES[i+1]]} {OTP_SERVICES[i+1]}", callback_data=f"otp_buy_{OTP_SERVICES[i+1]}"))
-        buttons.append(row)
-    
-    # Thêm dòng SMS VIP
-    buttons.append([InlineKeyboardButton(text=f"{SMS_VIP_EMOJI['SMS VIP']} SMS VIP (3000đ)", callback_data="sms_vip_buy")])
-    
-    # Hàng cuối: 2 nút chức năng
-    buttons.append([InlineKeyboardButton(text="📜 Lịch sử thuê", callback_data="otp_history"), InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    # Hàng 1: 2 site
+    buttons.append([
+        InlineKeyboardButton(text=f"🎰 CM88 - 2,750đ", callback_data="otp_buy_CM88"),
+        InlineKeyboardButton(text=f"🎲 C168 - 2,750đ", callback_data="otp_buy_C168")
+    ])
+    # Hàng 2: 2 site
+    buttons.append([
+        InlineKeyboardButton(text=f"✈️ FLY88 - 2,750đ", callback_data="otp_buy_FLY88"),
+        InlineKeyboardButton(text=f"🏆 F168 - 2,750đ", callback_data="otp_buy_F168")
+    ])
+    # Hàng 3: 1 site
+    buttons.append([
+        InlineKeyboardButton(text=f"🃏 CM88 - 2,750đ", callback_data="otp_buy_CM88"),
+    ])
+    # Hàng nút chức năng
+    buttons.append([
+        InlineKeyboardButton(text="📜 LỊCH SỬ THUÊ", callback_data="otp_history"),
+        InlineKeyboardButton(text="🔙 QUAY LẠI", callback_data="menu")
+    ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.callback_query(F.data == "otp_menu")
@@ -2259,7 +2273,7 @@ async def otp_service_handler(call: CallbackQuery):
     text = f"""
 🔐 <b>THUÊ OTP</b>
 
-💰 <b>Giá mỗi số:</b> {OTP_PRICE:,}đ
+💰 <b>Giá mỗi số:</b> {HUPSMS_PRICE:,}đ
 📱 <b>Đang thuê:</b> {active_count} số
 
 📋 <b>Chọn dịch vụ:</b>
@@ -2268,42 +2282,45 @@ async def otp_service_handler(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("otp_buy_"))
 async def otp_buy_handler(call: CallbackQuery):
-    """Xử lý thuê OTP - Tất cả site đều dùng OKEDA, cho phép thuê nhiều số cùng lúc"""
+    """Xử lý thuê OTP - Dùng HupSMS, cho phép thuê nhiều số cùng lúc"""
     service = call.data.split("_")[2]  # CM88, SC88, FLY88, F168, C168
     
     user = get_user(call.from_user.id)
     balance = user[3] if isinstance(user[3], int) else 0
     
-    if balance < OTP_PRICE:
-        await call.answer(f"❌ Số dư không đủ! Cần {OTP_PRICE:,}đ. Bạn có {balance:,}đ", show_alert=True)
+    if balance < HUPSMS_PRICE:
+        await call.answer(f"❌ Số dư không đủ! Cần {HUPSMS_PRICE:,}đ. Bạn có {balance:,}đ", show_alert=True)
         return
     
-    # Lấy service ID của Okeda
-    service_id = await get_okeda_service_id()
+    # Lấy service ID của OTP Game từ HupSMS
+    service_id = await get_hupsms_service_id()
     if not service_id:
-        await call.answer("❌ Không tìm thấy dịch vụ ! Vui lòng liên hệ Admin.", show_alert=True)
+        await call.answer("❌ Không tìm thấy dịch vụ! Vui lòng liên hệ Admin.", show_alert=True)
         return
     
-    # Gọi API thuê số OTP - DÙNG CHUNG OKEDA
-    result = await call_viotp_api("request/getv2", {"serviceId": service_id})
+    # Gọi API thuê số OTP từ HupSMS
+    result = await call_hupsms_api("rent", {"serviceId": service_id})
     
-    if not result.get('success'):
+    if result.get('status') != 'success':
         error_msg = result.get('message', 'Lỗi không xác định')
-        await call.answer(f"❌ Lỗi API : {error_msg}", show_alert=True)
+        await call.answer(f"❌ Lỗi API: {error_msg}", show_alert=True)
         return
     
     data = result.get('data', {})
-    phone = data.get('phone_number')
-    re_phone_number = data.get('re_phone_number')  # Thêm dòng này
-    request_id = data.get('request_id')
+    phone = data.get('phone')
+    request_id = data.get('orderId')
+    
+    # Format phone: bỏ số 0 đầu nếu có
+    if phone and phone.startswith('0'):
+        phone = phone[1:]
     
     if not phone or not request_id:
         await call.answer("❌ Không lấy được số điện thoại từ API!", show_alert=True)
         return
     
     # Trừ tiền SAU KHI API thành công
-    update_balance(call.from_user.id, -OTP_PRICE, f"Thuê OTP {service}")
-    new_balance = balance - OTP_PRICE
+    update_balance(call.from_user.id, -HUPSMS_PRICE, f"Thuê OTP {service}")
+    new_balance = balance - HUPSMS_PRICE
     
     # Tạo session mới
     session_id = f"{service}_{request_id}_{int(datetime.now().timestamp())}"
@@ -2323,14 +2340,14 @@ async def otp_buy_handler(call: CallbackQuery):
     current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
     active_count = len(otp_sessions[call.from_user.id])
     
-    # Gửi tin nhắn báo thuê thành công (HIỂN THỊ ĐẦY ĐỦ SDT + DỊCH VỤ + THỜI GIAN)
+    # Gửi tin nhắn báo thuê thành công
     await call.message.answer(
         f"✅ <b>THUÊ OTP THÀNH CÔNG!</b>\n\n"
         f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
         f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
         f"⏰ <b>Thời gian:</b> {current_time}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Giá:</b> {OTP_PRICE:,}đ\n"
+        f"💰 <b>Giá:</b> {HUPSMS_PRICE:,}đ\n"
         f"💵 <b>Số dư còn:</b> {new_balance:,}đ\n"
         f"📊 <b>Đang thuê:</b> {active_count} số\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2636,7 +2653,7 @@ async def sms_vip_rent_again_handler(call: CallbackQuery):
     asyncio.create_task(check_hupsms_loop(call.from_user.id, session_id, new_order_id, "SMS VIP", new_phone))
 
 async def check_otp_loop(user_id: int, session_id: str, request_id: str, service: str, phone: str):
-    """Vòng lặp check OTP mỗi 2 giây, tự động hoàn tiền sau 6 phút"""
+    """Vòng lặp check OTP từ HupSMS mỗi 2 giây, tự động hoàn tiền sau 6 phút"""
     start_time = datetime.now(VIETNAM_TZ)
     timeout_minutes = 6
     
@@ -2645,7 +2662,7 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
         
         # Hết 6 phút -> hoàn tiền
         if elapsed >= timeout_minutes:
-            update_balance(user_id, OTP_PRICE, f"Hoàn tiền thuê OTP {service} - hết 6 phút")
+            update_balance(user_id, HUPSMS_PRICE, f"Hoàn tiền thuê OTP {service} - hết 6 phút")
             
             await bot.send_message(
                 user_id,
@@ -2654,7 +2671,7 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                 f"📱 <b>Số:</b> <code>{phone}</code>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"⏰ Đã chờ {timeout_minutes} phút nhưng không nhận được OTP.\n"
-                f"💰 <b>Đã hoàn tiền:</b> {OTP_PRICE:,}đ\n"
+                f"💰 <b>Đã hoàn tiền:</b> {HUPSMS_PRICE:,}đ\n"
                 f"💡 Vui lòng thử lại sau!"
             )
             
@@ -2665,21 +2682,21 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                     del otp_sessions[user_id]
             return
         
-        # Gọi API check OTP
+        # Gọi API check OTP từ HupSMS
         try:
-            result = await call_viotp_api("session/getv2", {"requestId": request_id})
+            result = await call_hupsms_api(f"check/{request_id}")
             
-            if result.get('success'):
+            if result.get('status') == 'success':
                 data = result.get('data', {})
-                status = data.get('Status')
+                status = data.get('status')
                 
-                # Status = 1 là đã có OTP
-                if status == 1:
-                    code = data.get('Code', '')
-                    sms_content = data.get('SmsContent', '')
-                    is_sound = data.get('IsSound', False)
-                    phone = data.get('Phone', '')
-                    re_phone = data.get('PhoneOriginal', phone)
+                # status = "success" là đã có OTP
+                if status == "success":
+                    code = data.get('otp', '')
+                    sms_content = data.get('smsContent', '')
+                    is_voice = data.get('is_voice_otp', False)
+                    audio_url = data.get('audio_url', '')
+                    phone = data.get('phone', phone)
                     
                     # Lưu vào database
                     conn = get_db_connection()
@@ -2687,11 +2704,12 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                     c.execute("""
                         INSERT INTO otp_rentals (user_id, request_id, phone_number, service_name, price, code, sms_content, status, rented_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (user_id, request_id, phone, service, OTP_PRICE, code, sms_content, 1, datetime.now(VIETNAM_TZ).isoformat()))
+                    """, (user_id, request_id, phone, service, HUPSMS_PRICE, code, sms_content, 1, datetime.now(VIETNAM_TZ).isoformat()))
                     conn.commit()
                     conn.close()
                     
                     # Gửi thông báo cho admin
+                    profit = HUPSMS_PRICE - 2500  # Lợi nhuận 250đ
                     for admin_id in ADMIN_IDS:
                         await bot.send_message(
                             admin_id,
@@ -2700,58 +2718,58 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                             f"🎮 DV: {service}\n"
                             f"📱 Số: {phone}\n"
                             f"🔑 Mã: {code}\n"
-                            f"🎵 Audio: {is_sound}\n"
-                            f"💰 Lợi nhuận: 920đ"
+                            f"🎵 Audio: {is_voice}\n"
+                            f"💰 Lợi nhuận: {profit:,}đ"
                         )
                     
-                    # Xử lý OTP dạng audio
-                    if is_sound:
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(sms_content, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                                    if resp.status == 200:
-                                        audio_data = await resp.read()
-                                        
-                                        await bot.send_voice(
-                                            user_id,
-                                            voice=types.BufferedInputFile(audio_data, filename="otp.wav"),
-                                            caption=f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
-                                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
-                                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
-                                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
-                                                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                                                    f"💰 <b>Giá thuê mới:</b> {OTP_PRICE:,}đ\n"
-                                                    f"♻️ <b>Giá thuê lại:</b> 3,550đ\n"
-                                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
-                                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
-                                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                                [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,550đ)", callback_data=f"otp_rent_again_{request_id}_{re_phone}_{service}")],
-                                                [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
-                                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
-                                            ])
-                                        )
-                                    else:
-                                        raise Exception("Failed to download audio")
-                        except Exception as e:
-                            # Fallback: gửi link nếu tải lỗi
-                            await bot.send_message(
-                                user_id,
-                                f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
-                                f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
-                                f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
-                                f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
-                                f"🎵 <b>Audio OTP:</b> <a href='{sms_content}'>Nhấn để nghe</a>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"💰 <b>Giá thuê mới:</b> {OTP_PRICE:,}đ\n"
-                                f"♻️ <b>Giá thuê lại:</b> 3,550đ\n"
-                                f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
-                                f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
-                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                    [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,550đ)", callback_data=f"otp_rent_again_{request_id}_{re_phone}_{service}")],
-                                    [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
-                                    [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
-                                ])
-                            )
+                        # Xử lý OTP dạng audio
+                        if is_voice and audio_url:
+                            try:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                        if resp.status == 200:
+                                            audio_data = await resp.read()
+                                            
+                                            # Đảm bảo import đúng
+                                            from aiogram.types import BufferedInputFile
+                                            
+                                            await bot.send_voice(
+                                                user_id,
+                                                voice=BufferedInputFile(audio_data, filename="otp.ogg"),
+                                                caption=f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                                        f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                                        f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                                        f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                                                        f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                                        f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                                        f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                                    [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                                    [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                                ])
+                                            )
+                                        else:
+                                            raise Exception(f"HTTP {resp.status}")
+                            except Exception as e:
+                                print(f"Lỗi tải audio OTP: {e}")
+                                # Fallback: gửi link nếu tải lỗi
+                                await bot.send_message(
+                                    user_id,
+                                    f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                    f"🎵 <b>Audio OTP:</b> <a href='{audio_url}'>Nhấn để nghe</a>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                        [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                    ])
+                                )
                     else:
                         # OTP dạng text
                         await bot.send_message(
@@ -2762,12 +2780,10 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                             f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
                             f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
                             f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"💰 <b>Giá thuê mới:</b> {OTP_PRICE:,}đ\n"
-                            f"♻️ <b>Giá thuê lại:</b> 3,550đ\n"
+                            f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
                             f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
                             f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="♻️ THUÊ LẠI SỐ NÀY (3,550đ)", callback_data=f"otp_rent_again_{request_id}_{re_phone}_{service}")],
                                 [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
                                 [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
                             ])
@@ -2785,7 +2801,7 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
         await asyncio.sleep(2)
 @dp.callback_query(F.data.startswith("otp_rent_again_"))
 async def otp_rent_again_handler(call: CallbackQuery):
-    """Xử lý thuê lại số cũ với giá 3,550đ"""
+    """Xử lý thuê lại số cũ với giá 3,550đ - Dùng HupSMS"""
     data_parts = call.data.split("_")
     # otp_rent_again_request_id_phone_service
     request_id = data_parts[3]
@@ -2800,23 +2816,27 @@ async def otp_rent_again_handler(call: CallbackQuery):
         await call.answer(f"❌ Số dư không đủ! Cần {rent_again_price:,}đ. Bạn có {balance:,}đ", show_alert=True)
         return
     
-    # Lấy service ID của Okeda
-    service_id = await get_okeda_service_id()
+    # Lấy service ID của OTP Game từ HupSMS
+    service_id = await get_hupsms_service_id()
     if not service_id:
-        await call.answer("❌ Không tìm thấy dịch vụ OKEDA!", show_alert=True)
+        await call.answer("❌ Không tìm thấy dịch vụ OTP Game!", show_alert=True)
         return
     
-    # Gọi API thuê lại số cũ
-    result = await call_viotp_api("request/getv2", {"serviceId": service_id, "number": phone})
+    # Gọi API thuê lại số cũ từ HupSMS
+    result = await call_hupsms_api("rerent", {"phone": phone})
     
-    if not result.get('success'):
+    if result.get('status') != 'success':
         error_msg = result.get('message', 'Lỗi không xác định')
         await call.answer(f"❌ Lỗi thuê lại: {error_msg}", show_alert=True)
         return
     
     data = result.get('data', {})
-    new_request_id = data.get('request_id')
-    new_phone = data.get('phone_number', phone)
+    new_request_id = data.get('orderId')
+    new_phone = data.get('phone', phone)
+    
+    # Format phone: bỏ số 0 đầu nếu có
+    if new_phone and new_phone.startswith('0'):
+        new_phone = new_phone[1:]
     
     if not new_request_id:
         await call.answer("❌ Không thể thuê lại số này!", show_alert=True)
@@ -2843,7 +2863,19 @@ async def otp_rent_again_handler(call: CallbackQuery):
     current_time = datetime.now(VIETNAM_TZ).strftime("%H:%M:%S %d/%m/%Y")
     active_count = len(otp_sessions[call.from_user.id])
     
-    await call.message.answer(  # ✅ Đổi thành answer
+    # Gửi thông báo cho admin
+    profit = rent_again_price - 2500  # 3550 - 2500 = 1050đ
+    for admin_id in ADMIN_IDS:
+        await bot.send_message(
+            admin_id,
+            f"🔄 <b>THUÊ LẠI OTP</b>\n\n"
+            f"👤 User: {call.from_user.id}\n"
+            f"🎮 DV: {service}\n"
+            f"📱 Số: {new_phone}\n"
+            f"💰 Lợi nhuận: {profit:,}đ"
+        )
+    
+    await call.message.answer(
         f"✅ <b>THUÊ LẠI SỐ THÀNH CÔNG!</b>\n\n"
         f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
         f"📱 <b>Số điện thoại:</b> <code>{new_phone}</code>\n"
