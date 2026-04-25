@@ -20,6 +20,15 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BufferedInputFile
+# ==================== VOUCHER HELPER ====================
+def generate_voucher_code() -> str:
+    """Tạo mã voucher ngẫu nhiên cho MB Bank"""
+    import random
+    import string
+    # Format: MB + 10 số ngẫu nhiên + 2 chữ cái hoa
+    numbers = ''.join(random.choices(string.digits, k=10))
+    letters = ''.join(random.choices(string.ascii_uppercase, k=2))
+    return f"MB{numbers}{letters}"
 
 # ==================== HELPER FUNCTIONS ====================
 def normalize_datetime(dt):
@@ -220,6 +229,26 @@ def init_db():
     for site in SITES:
         c.execute("INSERT INTO site_settings (site, price) VALUES (%s, %s) ON CONFLICT (site) DO NOTHING", (site, SITE_PRICE[site]))
     
+    # Thêm vào hàm init_db() nếu chưa có
+    c.execute('''CREATE TABLE IF NOT EXISTS voucher_orders (
+        id SERIAL PRIMARY KEY,
+        request_id TEXT UNIQUE,
+        user_id BIGINT,
+        phone_number TEXT,
+        quantity INTEGER,
+        price INTEGER,
+        total_value INTEGER,
+        status TEXT DEFAULT 'PENDING',
+        confirmed_by BIGINT,
+        confirmed_at TEXT,
+        created_at TEXT
+    )''')
+    # Thêm cột quantity vào recharge_history nếu chưa có
+    try:
+        c.execute("ALTER TABLE recharge_history ADD COLUMN quantity INTEGER DEFAULT 1")
+        print("✅ Đã thêm cột quantity vào recharge_history")
+    except Exception as e:
+        print(f"ℹ️ Cột quantity đã tồn tại hoặc lỗi: {e}")
     conn.commit()
     conn.close()
     logger.info("✅ Database on VPS initialized")
@@ -590,6 +619,8 @@ class ProxyState(StatesGroup):
     waiting_for_new_rotate = State()
     waiting_for_proxy_id_renew = State()
     waiting_for_renew_days = State()
+class VoucherState(StatesGroup):
+    waiting_for_quantity = State()
 
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
@@ -597,13 +628,16 @@ def main_menu(user_balance: int = 0):
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🛒 MUA ACC"), KeyboardButton(text="🔐 THUÊ OTP")],
-            [KeyboardButton(text="🌐 MUA PROXY"), KeyboardButton(text="💰 SỐ DƯ")],  # Thêm dòng này
+            [KeyboardButton(text="🌐 MUA PROXY"), KeyboardButton(text="💰 SỐ DƯ")],
             [KeyboardButton(text="📜 LỊCH SỬ"), KeyboardButton(text="💳 NẠP TIỀN")],
-            [KeyboardButton(text="👥 GIỚI THIỆU"), KeyboardButton(text="👤 THÔNG TIN"), KeyboardButton(text="🆘 HỖ TRỢ")],
+            [KeyboardButton(text="👥 GIỚI THIỆU"), KeyboardButton(text="🎫 VOUCHER MB")],
+            [KeyboardButton(text="👤 THÔNG TIN"), KeyboardButton(text="🆘 HỖ TRỢ")],
+            [KeyboardButton(text="🔙 QUAY LẠI MENU CHÍNH")],
         ],
         resize_keyboard=True,
         input_field_placeholder="🔽 Chọn chức năng"
     )
+
 @dp.message(F.text == "🌐 MUA PROXY")
 async def handle_proxy_menu(msg: Message):
     """Hiển thị menu Proxy"""
@@ -1955,6 +1989,234 @@ async def create_proxy_order(product_id: str, quantity: int, days: int, rotate_i
         data["products"][0]["location"] = location
     result = await call_panda_api("orders", method="POST", data=data)
     return result
+# ==================== VOUCHER MB ====================
+@dp.message(F.text == "🎫 VOUCHER MB")
+async def voucher_mb_menu(msg: Message, state: FSMContext):
+    """Hiển thị menu mua Voucher MB"""
+    await msg.answer(
+        "🏦 <b>VOUCHER MB (MBBank)</b>\n\n"
+        "💰 <b>Giá:</b> 7,000đ / 1 voucher\n"
+        "📝 <b>Nhập theo format:</b> <code>số_điện_thoại|số_lượng</code>\n\n"
+        "<b>Ví dụ:</b>\n"
+        "<code>0987654321|5</code> (mua 5 voucher)\n"
+        "<code>0912345678|10</code> (mua 10 voucher)\n\n"
+        "Gửi /cancel để hủy"
+    )
+    await state.set_state(VoucherState.waiting_for_quantity)
+
+@dp.message(VoucherState.waiting_for_quantity)
+async def voucher_process_quantity(msg: Message, state: FSMContext):
+    """User mua voucher - tạo đơn và trừ tiền ngay"""
+    try:
+        parts = msg.text.strip().split('|')
+        
+        if len(parts) != 2:
+            await msg.answer(
+                "❌ <b>SAI FORMAT!</b>\n\n"
+                "Vui lòng nhập đúng format:\n"
+                "<code>số_điện_thoại|số_lượng</code>\n\n"
+                "<b>Ví dụ:</b>\n"
+                "<code>0987654321|5</code>"
+            )
+            return
+        
+        phone_number = parts[0].strip()
+        quantity = int(parts[1].strip())
+        
+        if not phone_number or len(phone_number) < 9:
+            await msg.answer("❌ Số điện thoại không hợp lệ!")
+            return
+        
+        if quantity < 1 or quantity > 100:
+            await msg.answer("❌ Số lượng từ 1-100 voucher!")
+            return
+        
+        price = quantity * 7000
+        total_value = quantity * 10000
+        
+        user = get_user(msg.from_user.id)
+        balance = user[3] if isinstance(user[3], int) else 0
+        
+        if balance < price:
+            await msg.answer(f"❌ Số dư không đủ! Cần {price:,}đ, bạn có {balance:,}đ")
+            await state.clear()
+            return
+        
+        # Tạo request_id duy nhất
+        timestamp = int(datetime.now().timestamp())
+        request_id = f"VOUCHER_{msg.from_user.id}_{timestamp}"
+        print(f"[DEBUG] Tạo đơn hàng: {request_id}")
+        
+        # TRỪ TIỀN NGAY
+        update_balance(msg.from_user.id, -price, f"Mua voucher MB {quantity} cái - SĐT {phone_number} - Mã {request_id}")
+        new_balance = balance - price
+        
+        # LƯU VÀO DATABASE
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO voucher_orders (request_id, user_id, phone_number, quantity, price, total_value, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'PENDING', %s)
+        """, (request_id, msg.from_user.id, phone_number, quantity, price, total_value, datetime.now(VIETNAM_TZ).isoformat()))
+        conn.commit()
+        conn.close()
+        
+        # Gửi thông báo cho admin
+        admin_text = f"""
+🎫 <b>ĐƠN HÀNG VOUCHER MB MỚI</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 <b>User ID:</b> <code>{msg.from_user.id}</code>
+👤 <b>Tên:</b> {msg.from_user.full_name}
+💬 <b>Username:</b> @{msg.from_user.username or 'không có'}
+📱 <b>Số nhận:</b> <code>{phone_number}</code>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📦 <b>Số lượng:</b> {quantity} voucher
+💰 <b>Tổng tiền:</b> {price:,}đ
+💵 <b>Số dư còn:</b> {new_balance:,}đ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 <b>Thời gian:</b> {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}
+"""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ XÁC NHẬN & GỬI VOUCHER", callback_data=f"voucher_confirm_{request_id}"),
+                InlineKeyboardButton(text="❌ TỪ CHỐI & HOÀN TIỀN", callback_data=f"voucher_reject_{request_id}")
+            ]
+        ])
+        
+        for admin_id in ADMIN_IDS:
+            await bot.send_message(admin_id, admin_text, reply_markup=keyboard)
+        
+        await msg.answer(
+            f"✅ <b>ĐẶT MUA VOUCHER THÀNH CÔNG!</b>\n\n"
+            f"📱 Số nhận: <code>{phone_number}</code>\n"
+            f"📦 Số lượng: {quantity} voucher\n"
+            f"💰 Đã trừ: {price:,}đ\n"
+            f"💵 Số dư còn: {new_balance:,}đ\n"
+            f"⏳ Vui lòng chờ admin xác nhận và gửi voucher."
+        )
+        
+        await state.clear()
+        
+    except ValueError:
+        await msg.answer("❌ Số lượng phải là số!\nFormat: <code>số_điện_thoại|số_lượng</code>")
+    except Exception as e:
+        await msg.answer(f"❌ Lỗi: {str(e)}")
+@dp.callback_query(F.data.startswith("voucher_confirm_"))
+async def voucher_confirm(call: CallbackQuery):
+    """Admin xác nhận - gửi voucher, cộng doanh thu và xóa đơn"""
+    
+    # Lấy request_id đúng cách
+    request_id = call.data.replace("voucher_confirm_", "")
+    print(f"[DEBUG] Xác nhận đơn: {request_id}")
+    
+    if not request_id:
+        await call.answer("❌ Lỗi: Không có mã đơn hàng!", show_alert=True)
+        return
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT user_id, phone_number, quantity, price, total_value FROM voucher_orders WHERE request_id = %s", (request_id,))
+    order = c.fetchone()
+    
+    if not order:
+        await call.answer(f"❌ Không tìm thấy đơn hàng: {request_id}", show_alert=True)
+        conn.close()
+        return
+    
+    user_id, phone_number, quantity, price, total_value = order
+    print(f"[DEBUG] Tìm thấy đơn: user={user_id}, số lượng={quantity}, giá={price}")
+    
+    # Tạo danh sách voucher
+    vouchers = []
+    for i in range(quantity):
+        voucher_code = generate_voucher_code()
+        vouchers.append(voucher_code)
+    
+    # Gửi voucher cho user
+    voucher_text = f"""
+🎫 <b>ĐÃ HOÀN THÀNH</b>
+
+📱 <b>Số nhận:</b> <code>{phone_number}</code>
+📦 <b>Số lượng:</b> {quantity} voucher
+"""    
+    try:
+        await call.bot.send_message(user_id, voucher_text)
+        await call.bot.send_message(user_id, f"✅ Đã gửi {quantity} voucher MB thành công!")
+        print(f"[DEBUG] Đã gửi voucher thành công cho user {user_id}")
+    except Exception as e:
+        print(f"[DEBUG] Lỗi gửi tin nhắn: {e}")
+        await call.answer(f"Lỗi gửi tin nhắn: {str(e)[:50]}", show_alert=True)
+    
+    # ✅ CỘNG DOANH THU VÀO RECHARGE_HISTORY (CÓ LƯU CẢ SỐ LƯỢNG)
+    c.execute("""
+        INSERT INTO recharge_history (user_id, amount, quantity, note, created_at) 
+        VALUES (%s, %s, %s, %s, %s)
+    """, (user_id, price, quantity, f"VOUCHER MB - {quantity} cái - SĐT {phone_number} - Mã {request_id}", datetime.now(VIETNAM_TZ).isoformat()))
+    print(f"[DEBUG] Đã cộng doanh thu {price}đ cho {quantity} voucher (user {user_id})")
+    
+    # Cập nhật trạng thái đơn hàng thành CONFIRMED
+    c.execute("""
+        UPDATE voucher_orders 
+        SET status = 'CONFIRMED', confirmed_by = %s, confirmed_at = %s 
+        WHERE request_id = %s
+    """, (call.from_user.id, datetime.now(VIETNAM_TZ).isoformat(), request_id))
+    
+    conn.commit()
+    conn.close()
+    
+    await call.message.edit_text(f"✅ Đã xác nhận, gửi {quantity} voucher và cộng doanh thu {price:,}đ cho user {user_id}!")
+    await call.answer("Đã xác nhận thành công!")
+
+@dp.callback_query(F.data.startswith("voucher_reject_"))
+async def voucher_reject(call: CallbackQuery):
+    """Admin từ chối - hoàn tiền, KHÔNG cộng doanh thu và xóa đơn"""
+    
+    # Lấy request_id đúng cách
+    request_id = call.data.replace("voucher_reject_", "")
+    print(f"[DEBUG] Từ chối đơn: {request_id}")
+    
+    if not request_id:
+        await call.answer("❌ Lỗi: Không có mã đơn hàng!", show_alert=True)
+        return
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT user_id, quantity, price FROM voucher_orders WHERE request_id = %s", (request_id,))
+    order = c.fetchone()
+    
+    if not order:
+        await call.answer(f"❌ Không tìm thấy đơn hàng: {request_id}", show_alert=True)
+        conn.close()
+        return
+    
+    user_id, quantity, price = order
+    print(f"[DEBUG] Tìm thấy đơn: user={user_id}, số lượng={quantity}, giá={price}")
+    
+    # ✅ HOÀN TIỀN CHO USER (vì đã trừ khi tạo đơn)
+    update_balance(user_id, price, f"Hoàn tiền voucher {quantity} cái - Đơn bị từ chối - Mã {request_id}")
+    print(f"[DEBUG] Đã hoàn tiền {price}đ cho user {user_id}")
+    
+    # Gửi thông báo cho user
+    try:
+        await call.bot.send_message(user_id, f"❌ Đơn hàng voucher của bạn đã bị từ chối! Đã hoàn lại {price:,}đ.")
+        print(f"[DEBUG] Đã gửi thông báo từ chối cho user {user_id}")
+    except Exception as e:
+        print(f"[DEBUG] Lỗi gửi tin nhắn: {e}")
+    
+    # Cập nhật trạng thái đơn hàng thành REJECTED
+    c.execute("""
+        UPDATE voucher_orders 
+        SET status = 'REJECTED', confirmed_by = %s, confirmed_at = %s 
+        WHERE request_id = %s
+    """, (call.from_user.id, datetime.now(VIETNAM_TZ).isoformat(), request_id))
+    
+    conn.commit()
+    conn.close()
+    
+    await call.message.edit_text(f"❌ Đã từ chối và hoàn tiền {price:,}đ cho user {user_id}!")
+    await call.answer("Đã từ chối và hoàn tiền!")
 
 async def get_user_proxies_api(order_id: str = None) -> List[dict]:
     """Lấy danh sách Proxy đã mua từ API"""
@@ -2212,7 +2474,7 @@ def otp_service_menu():
     ])
     # Hàng 3: 1 site
     buttons.append([
-        InlineKeyboardButton(text=f"🃏 CM88 - 2,750đ", callback_data="otp_buy_CM88"),
+        InlineKeyboardButton(text=f"🃏 SC88 - 2,750đ", callback_data="otp_buy_SC88"),
     ])
     # Hàng nút chức năng
     buttons.append([
@@ -2730,7 +2992,6 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                                         if resp.status == 200:
                                             audio_data = await resp.read()
                                             
-                                            # Đảm bảo import đúng
                                             from aiogram.types import BufferedInputFile
                                             
                                             await bot.send_voice(
@@ -2742,9 +3003,11 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                                                         f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
                                                         f"━━━━━━━━━━━━━━━━━━━━\n"
                                                         f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                                        f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
                                                         f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
                                                         f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
                                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                                    [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
                                                     [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
                                                     [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
                                                 ])
@@ -2763,31 +3026,35 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                                     f"🎵 <b>Audio OTP:</b> <a href='{audio_url}'>Nhấn để nghe</a>\n"
                                     f"━━━━━━━━━━━━━━━━━━━━\n"
                                     f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                    f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
                                     f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
                                     f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
                                         [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
                                         [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
                                     ])
                                 )
-                    else:
-                        # OTP dạng text
-                        await bot.send_message(
-                            user_id,
-                            f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
-                            f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
-                            f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
-                            f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
-                            f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
-                            f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
-                            f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
-                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
-                            ])
-                        )
+                            else:
+                                # OTP dạng text
+                                await bot.send_message(
+                                    user_id,
+                                    f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                    f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                    f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
+                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                        [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
+                                        [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                        [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                    ])
+                                )
                     
                     # Xóa session khỏi danh sách
                     if user_id in otp_sessions:
@@ -3323,6 +3590,7 @@ async def admin_dash(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS:
         await call.answer("Không có quyền!")
         return
+    
     inv = get_inventory()
     sold, revenue = get_sold_stats()
     daily = get_daily_stats()
@@ -3331,38 +3599,114 @@ async def admin_dash(call: CallbackQuery):
     total_sold = sum(sold.values())
     total_inv = sum(inv.values())
     
-    # Tính doanh thu OTP
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM otp_rentals WHERE status = 1")
-    otp_success = c.fetchone()[0]
+    
+    # Thống kê OTP
+    try:
+        c.execute("SELECT COUNT(*) FROM otp_rentals WHERE status = 1")
+        result = c.fetchone()
+        otp_success = result[0] if result else 0
+    except:
+        otp_success = 0
     otp_profit = otp_success * 920
     
-    # ==================== THỐNG KÊ PROXY ====================
-    # Tổng số proxy đã bán
-    c.execute("SELECT COUNT(*), COALESCE(SUM(price), 0), COALESCE(SUM(days), 0) FROM proxy_purchases")
-    proxy_total_count, proxy_total_revenue, proxy_total_days = c.fetchone()
-    if proxy_total_count is None:
-        proxy_total_count = 0
-        proxy_total_revenue = 0
-        proxy_total_days = 0
+    # ==================== THỐNG KÊ VOUCHER MB ====================
+    # Lấy tất cả dữ liệu voucher từ recharge_history
+    try:
+        c.execute("SELECT amount, quantity, created_at FROM recharge_history WHERE note LIKE '%VOUCHER MB%'")
+        rows = c.fetchall()
+    except Exception as e:
+        print(f"Lỗi query: {e}")
+        rows = []
     
-    # Proxy còn hạn
-    c.execute("SELECT COUNT(*) FROM proxy_purchases WHERE expired_at > NOW()")
-    proxy_active_count = c.fetchone()[0]
-    if proxy_active_count is None:
+    # Lấy ngày hôm nay theo giờ VN
+    today_start = datetime.now(VIETNAM_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+    
+    total_revenue_voucher = 0
+    total_quantity_voucher = 0
+    today_revenue_voucher = 0
+    today_quantity_voucher = 0
+    
+    for row in rows:
+        amount = row[0] if row[0] else 0
+        quantity = row[1] if len(row) > 1 and row[1] else 1
+        created_at_str = row[2] if len(row) > 2 and row[2] else ""
+        
+        total_revenue_voucher += amount
+        total_quantity_voucher += quantity
+        
+        # ✅ SỬA LỖI PARSE DATETIME
+        try:
+            if created_at_str:
+                # Xử lý chuỗi datetime: "2026-04-26T01:13:08.590585+07:00"
+                # Loại bỏ micro giây và timezone
+                clean_str = created_at_str.split('.')[0]  # Lấy phần trước dấu chấm
+                clean_str = clean_str.replace('T', ' ')  # Thay T bằng space
+                # Loại bỏ timezone nếu còn
+                if '+' in clean_str:
+                    clean_str = clean_str.split('+')[0]
+                if 'Z' in clean_str:
+                    clean_str = clean_str.replace('Z', '')
+                
+                # Parse thành datetime
+                created_dt = datetime.strptime(clean_str, '%Y-%m-%d %H:%M:%S')
+                
+                # Gán timezone UTC (vì dữ liệu lưu theo UTC)
+                created_dt = pytz.UTC.localize(created_dt)
+                # Chuyển sang giờ VN
+                created_vn = created_dt.astimezone(VIETNAM_TZ)
+                
+                # So sánh với ngày hôm nay (VN)
+                if today_start <= created_vn < today_end:
+                    today_revenue_voucher += amount
+                    today_quantity_voucher += quantity
+        except Exception as e:
+            print(f"[DEBUG] Lỗi parse date: {created_at_str} - {e}")
+            # Fallback: lọc bằng string
+            today_str = today_start.strftime('%Y-%m-%d')
+            if created_at_str and created_at_str.startswith(today_str):
+                today_revenue_voucher += amount
+                today_quantity_voucher += quantity
+    
+    # Đơn đang chờ xử lý
+    try:
+        c.execute("SELECT COUNT(*) FROM voucher_orders WHERE status = 'PENDING'")
+        result = c.fetchone()
+        voucher_pending = result[0] if result else 0
+    except:
+        voucher_pending = 0
+    
+    # ==================== THỐNG KÊ PROXY ====================
+    try:
+        c.execute("SELECT COUNT(*), COALESCE(SUM(price), 0), COALESCE(SUM(days), 0) FROM proxy_purchases")
+        result = c.fetchone()
+        if result:
+            proxy_total_count, proxy_total_revenue, proxy_total_days = result
+        else:
+            proxy_total_count, proxy_total_revenue, proxy_total_days = 0, 0, 0
+    except:
+        proxy_total_count, proxy_total_revenue, proxy_total_days = 0, 0, 0
+    
+    try:
+        c.execute("SELECT COUNT(*) FROM proxy_purchases WHERE expired_at > NOW()")
+        result = c.fetchone()
+        proxy_active_count = result[0] if result else 0
+    except:
         proxy_active_count = 0
     
-    # Proxy hôm nay
-    today = datetime.now(VIETNAM_TZ).date().isoformat()
-    c.execute("SELECT COUNT(*), COALESCE(SUM(price), 0), COALESCE(SUM(days), 0) FROM proxy_purchases WHERE DATE(purchased_at) = %s", (today,))
-    proxy_today_count, proxy_today_revenue, proxy_today_days = c.fetchone()
-    if proxy_today_count is None:
-        proxy_today_count = 0
-        proxy_today_revenue = 0
-        proxy_today_days = 0
+    today_str = today_start.strftime('%Y-%m-%d')
+    try:
+        c.execute("SELECT COUNT(*), COALESCE(SUM(price), 0), COALESCE(SUM(days), 0) FROM proxy_purchases WHERE DATE(purchased_at) = %s", (today_str,))
+        result = c.fetchone()
+        if result:
+            proxy_today_count, proxy_today_revenue, proxy_today_days = result
+        else:
+            proxy_today_count, proxy_today_revenue, proxy_today_days = 0, 0, 0
+    except:
+        proxy_today_count, proxy_today_revenue, proxy_today_days = 0, 0, 0
     
-    # Tính lợi nhuận proxy (giá bán - (số ngày x 4,000đ))
     proxy_total_profit = proxy_total_revenue - (proxy_total_days * 4000)
     proxy_today_profit = proxy_today_revenue - (proxy_today_days * 4000)
     
@@ -3383,9 +3727,15 @@ async def admin_dash(call: CallbackQuery):
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 🌐 <b>Thống kê PROXY:</b>
-• Hôm nay: {proxy_today_count} proxy | {proxy_today_revenue:,}đ ({proxy_today_days} ngày) | 📈 LN: {proxy_today_profit:,}đ
-• Tổng đã bán: {proxy_total_count} proxy | {proxy_total_revenue:,}đ ({proxy_total_days} ngày) | 📈 LN: {proxy_total_profit:,}đ
+• Hôm nay: {proxy_today_count} proxy | {proxy_today_revenue:,}đ | 📈 LN: {proxy_today_profit:,}đ
+• Tổng đã bán: {proxy_total_count} proxy | {proxy_total_revenue:,}đ | 📈 LN: {proxy_total_profit:,}đ
 • Đang hoạt động: {proxy_active_count} proxy
+
+━━━━━━━━━━━━━━━━━━━━━━━
+🎫 <b>Thống kê VOUCHER MB:</b>
+• Hôm nay: {today_quantity_voucher} voucher | {today_revenue_voucher:,}đ
+• Tổng đã bán: {total_quantity_voucher} voucher | {total_revenue_voucher:,}đ
+• Đang chờ xử lý: {voucher_pending} đơn
 
 ━━━━━━━━━━━━━━━━━━━━━━━
 🔐 <b>Thống kê OTP:</b>
