@@ -114,8 +114,9 @@ PROXY_LOCATIONS = ["HCM", "HNI", "BDG", "RANDOM"]
 ROTATE_INTERVALS = [0]
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
-ADMIN_IDS = [5180190297]
+ADMIN_IDS = [5180190297, 6448523574]
 ADMIN_USERNAMES = ["makkllai"]
+ADMIN_USERNAMES = ["minhthune2003"]
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # Thêm dòng này
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
@@ -2984,77 +2985,78 @@ async def check_otp_loop(user_id: int, session_id: str, request_id: str, service
                             f"💰 Lợi nhuận: {profit:,}đ"
                         )
                     
-                        # Xử lý OTP dạng audio
-                        if is_voice and audio_url:
-                            try:
-                                async with aiohttp.ClientSession() as session:
-                                    async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                                        if resp.status == 200:
-                                            audio_data = await resp.read()
-                                            
-                                            from aiogram.types import BufferedInputFile
-                                            
-                                            await bot.send_voice(
-                                                user_id,
-                                                voice=BufferedInputFile(audio_data, filename="otp.ogg"),
-                                                caption=f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
-                                                        f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
-                                                        f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
-                                                        f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
-                                                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                                                        f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
-                                                        f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
-                                                        f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
-                                                        f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
-                                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                                    [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
-                                                    [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
-                                                    [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
-                                                ])
-                                            )
-                                        else:
-                                            raise Exception(f"HTTP {resp.status}")
-                            except Exception as e:
-                                print(f"Lỗi tải audio OTP: {e}")
-                                # Fallback: gửi link nếu tải lỗi
-                                await bot.send_message(
-                                    user_id,
-                                    f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
-                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
-                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
-                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
-                                    f"🎵 <b>Audio OTP:</b> <a href='{audio_url}'>Nhấn để nghe</a>\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
-                                    f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
-                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
-                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
-                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                        [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
-                                        [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
-                                        [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
-                                    ])
-                                )
-                            else:
-                                # OTP dạng text
-                                await bot.send_message(
-                                    user_id,
-                                    f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
-                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
-                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
-                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
-                                    f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
-                                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
-                                    f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
-                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
-                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
-                                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                        [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
-                                        [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
-                                        [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
-                                    ])
-                                )
+                    # ✅ ĐOẠN NÀY ĐÃ ĐƯỢC ĐƯA RA NGOÀI VÒNG LẶP ADMIN
+                    # Xử lý OTP dạng audio
+                    if is_voice and audio_url:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                    if resp.status == 200:
+                                        audio_data = await resp.read()
+                                        
+                                        from aiogram.types import BufferedInputFile
+                                        
+                                        await bot.send_voice(
+                                            user_id,
+                                            voice=BufferedInputFile(audio_data, filename="otp.ogg"),
+                                            caption=f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                                    f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                                    f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                                    f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                                    f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                                    f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
+                                                    f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                                    f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                                [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
+                                                [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                            ])
+                                        )
+                                    else:
+                                        raise Exception(f"HTTP {resp.status}")
+                        except Exception as e:
+                            print(f"Lỗi tải audio OTP: {e}")
+                            # Fallback: gửi link nếu tải lỗi
+                            await bot.send_message(
+                                user_id,
+                                f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                                f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                                f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                                f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                                f"🎵 <b>Audio OTP:</b> <a href='{audio_url}'>Nhấn để nghe</a>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                                f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
+                                f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                                f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
+                                    [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                    [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                                ])
+                            )
+                    else:
+                        # OTP dạng text
+                        await bot.send_message(
+                            user_id,
+                            f"✅ <b>NHẬN MÃ OTP THÀNH CÔNG!</b>\n\n"
+                            f"🎮 <b>Dịch vụ:</b> {OTP_SERVICE_EMOJI[service]} {service}\n"
+                            f"📱 <b>Số điện thoại:</b> <code>{phone}</code>\n"
+                            f"🔑 <b>Mã OTP:</b> <code>{code}</code>\n"
+                            f"📝 <b>Nội dung:</b> {sms_content[:200]}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💰 <b>Giá thuê:</b> {HUPSMS_PRICE:,}đ\n"
+                            f"♻️ <b>Thuê lại số này:</b> 3,550đ\n"
+                            f"⏱️ <b>Thời gian nhận:</b> {int(elapsed * 60)} giây\n\n"
+                            f"⚠️ Mã OTP có hiệu lực trong 2 phút!",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="♻️ THUÊ LẠI", callback_data=f"otp_rent_again_{request_id}_{phone}_{service}")],
+                                [InlineKeyboardButton(text="🔐 Thuê số mới", callback_data="otp_menu")],
+                                [InlineKeyboardButton(text="🏠 Menu", callback_data="menu")]
+                            ])
+                        )
                     
                     # Xóa session khỏi danh sách
                     if user_id in otp_sessions:
