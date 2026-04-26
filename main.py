@@ -115,8 +115,7 @@ ROTATE_INTERVALS = [0]
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
 ADMIN_IDS = [5180190297, 6448523574]
-ADMIN_USERNAMES = ["makkllai"]
-ADMIN_USERNAMES = ["minhthune2003"]
+ADMIN_USERNAMES = ["makkllai", "minhthune2003"]
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # Thêm dòng này
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
