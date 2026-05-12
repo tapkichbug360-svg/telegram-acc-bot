@@ -89,19 +89,28 @@ async def sepay_webhook(request: Request):
         
         print(f"💰 Amount: {amount}, Content: {content}, TransID: {trans_id}")
         
-        # Parse nội dung: "NAP TAGDMD5E 5180190297 ..."
-        parts = content.split()
-        telegram_id = None
+        # Parse nội dung: Tìm user ID (số có 9-10 chữ số)
+        import re
         
-        # Tìm user ID trong nội dung (số có 10 chữ số)
-        for part in parts:
-            if part.isdigit() and len(part) >= 9:
-                telegram_id = int(part)
-                break
+        # Tìm tất cả các số có 9-10 chữ số trong nội dung
+        numbers = re.findall(r'\b(\d{9,10})\b', content)
+        
+        telegram_id = None
+        if numbers:
+            # Ưu tiên số có 10 chữ số (user ID Telegram)
+            for num in numbers:
+                if len(num) == 10:
+                    telegram_id = int(num)
+                    break
+            # Nếu không có số 10 chữ số, lấy số 9 chữ số
+            if telegram_id is None and numbers:
+                telegram_id = int(numbers[0])
         
         if telegram_id is None:
-            print("⚠️ Không tìm thấy user ID trong nội dung")
+            print(f"⚠️ Không tìm thấy user ID trong nội dung: {content}")
             return {"status": "ignored", "message": "No user ID found"}
+        
+        print(f"👤 User ID: {telegram_id}")
         
         print(f"👤 User ID: {telegram_id}")
         
