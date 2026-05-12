@@ -3367,8 +3367,38 @@ async def process_recharge_amount(msg: Message, state: FSMContext):
 Gửi /cancel để hủy
 """
         
-        # Gửi ảnh QR kèm hướng dẫn
-        await msg.answer_photo(photo=qr_url, caption=caption)
+        # Gửi ảnh QR kèm hướng dẫn (có retry và timeout dài hơn)
+        import aiohttp
+        from aiogram.types import BufferedInputFile
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                timeout = aiohttp.ClientTimeout(total=60, connect=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(qr_url) as resp:
+                        if resp.status == 200:
+                            photo_data = await resp.read()
+                            # ✅ Dùng BufferedInputFile thay vì InputFile
+                            await msg.answer_photo(
+                                photo=BufferedInputFile(photo_data, filename="qr.png"), 
+                                caption=caption
+                            )
+                            return
+                        else:
+                            raise Exception(f"HTTP {resp.status}")
+            except asyncio.TimeoutError:
+                print(f"Timeout lần {attempt + 1}/{max_retries}")
+                if attempt == max_retries - 1:
+                    await msg.answer(f"{caption}\n\n⚠️ Không thể tải ảnh QR, vui lòng nhấp vào link:\n{qr_url}")
+                else:
+                    await asyncio.sleep(2)
+            except Exception as e:
+                print(f"Lỗi lần {attempt + 1}: {e}")
+                if attempt == max_retries - 1:
+                    await msg.answer(f"{caption}\n\n⚠️ Lỗi: {e}\n🔗 Link QR: {qr_url}")
+                else:
+                    await asyncio.sleep(2)
         await state.clear()
         
     except ValueError:
