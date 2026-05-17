@@ -98,6 +98,10 @@ def fix_ref_code():
         print(f"Lỗi cập nhật: {e}")
     
     conn.close()
+# DATA là số điện thoại - Giá 10k
+DATA_SITES = ["UY88", "GO99", "MMOO", "WW88", "TT88"]
+DATA_SITE_EMOJI = {"UY88": "📱", "GO99": "📞", "MMOO": "💬", "WW88": "📲", "TT88": "📳"}
+DATA_SITE_PRICE = 10000  # Giá mỗi số 10k
 # ==================== CẤU HÌNH PROXY ====================
 PANDA_PROXY_TOKEN = "panda645884_5f29bcbfaf0c4e4fedd84bcdccd035589d1da0912d126f3405741a830b2346a4"
 PANDA_MERCHANT_ID = "357e7dcd-d4a0-4ada-96da-c3725d3defa6"
@@ -114,8 +118,8 @@ PROXY_LOCATIONS = ["HCM", "HNI", "BDG", "RANDOM"]
 ROTATE_INTERVALS = [0]
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
-ADMIN_IDS = [5180190297, 6448523574]
-ADMIN_USERNAMES = ["makkllai", "minhthune2003"]
+ADMIN_IDS = [5180190297, 7053543892]
+ADMIN_USERNAMES = ["makkllai", "imquanglam"]
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # Thêm dòng này
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
@@ -207,7 +211,7 @@ def init_db():
         site TEXT, username TEXT, password TEXT, 
         withdraw_password TEXT, real_name TEXT, bank_number TEXT, phone TEXT,
         price INTEGER DEFAULT 20000,
-        is_sold INTEGER DEFAULT 0, sold_to INTEGER, sold_at TEXT, created_at TEXT,
+        is_sold INTEGER DEFAULT 0, sold_to BIGINT, sold_at TEXT, created_at TEXT,
         note TEXT)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS purchases (
@@ -242,6 +246,28 @@ def init_db():
         confirmed_by BIGINT,
         confirmed_at TEXT,
         created_at TEXT
+    )''')
+    # Thêm vào hàm init_db()
+    c.execute('''CREATE TABLE IF NOT EXISTS data_phones (
+        id SERIAL PRIMARY KEY,
+        site TEXT,
+        phone_number TEXT,
+        price INTEGER DEFAULT 10000,
+        is_sold INTEGER DEFAULT 0,
+        sold_to BIGINT,
+        sold_at TEXT,
+        created_at TEXT
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS data_phone_purchases (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        phone_id INTEGER,
+        site TEXT,
+        phone_number TEXT,
+        quantity INTEGER,
+        amount INTEGER,
+        purchased_at TEXT
     )''')
     # Thêm cột quantity vào recharge_history nếu chưa có
     try:
@@ -595,6 +621,11 @@ class AddAccountState(StatesGroup):
     waiting_for_site = State()
     waiting_for_account = State()
 
+class DataState(StatesGroup):
+    waiting_for_quantity = State()  # Chờ nhập số lượng
+    waiting_for_site = State()  # Chờ chọn site (cho admin)
+    waiting_for_phones = State()  # Chờ nhập danh sách số
+
 class MoneyState(StatesGroup):
     waiting_for_user = State()
     waiting_for_amount = State()
@@ -625,19 +656,34 @@ class VoucherState(StatesGroup):
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 def main_menu(user_balance: int = 0):
+    """Menu chính được sắp xếp gọn gàng, chuyên nghiệp"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🛒 MUA ACC"), KeyboardButton(text="🔐 THUÊ OTP")],
-            [KeyboardButton(text="🌐 MUA PROXY"), KeyboardButton(text="💰 SỐ DƯ")],
+            # Hàng 1: Mua hàng và Số dư
+            [KeyboardButton(text="🛍️ MUA HÀNG"), KeyboardButton(text="💰 SỐ DƯ")],
+            
+            # Hàng 2: Lịch sử và Nạp tiền
             [KeyboardButton(text="📜 LỊCH SỬ"), KeyboardButton(text="💳 NẠP TIỀN")],
-            [KeyboardButton(text="👥 GIỚI THIỆU"), KeyboardButton(text="🎫 VOUCHER MB")],
-            [KeyboardButton(text="👤 THÔNG TIN"), KeyboardButton(text="🆘 HỖ TRỢ")],
-            [KeyboardButton(text="🔙 QUAY LẠI MENU CHÍNH")],
+            
+            # Hàng 3: Giới thiệu và Thông tin
+            [KeyboardButton(text="👥 GIỚI THIỆU"), KeyboardButton(text="👤 THÔNG TIN")],
+            
+            # Hàng 4: Hỗ trợ
+            [KeyboardButton(text="🆘 HỖ TRỢ")],
         ],
         resize_keyboard=True,
-        input_field_placeholder="🔽 Chọn chức năng"
+        input_field_placeholder="🔽 Chọn chức năng..."
     )
-
+# ==================== MENU MUA HÀNG MỚI ====================
+def buy_goods_menu():
+    """Tạo menu con cho chức năng MUA HÀNG"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 MUA ACC", callback_data="buy_acc")],
+        [InlineKeyboardButton(text="🔐 THUÊ OTP", callback_data="rent_otp")],
+        [InlineKeyboardButton(text="🌐 MUA PROXY", callback_data="buy_proxy")],
+        [InlineKeyboardButton(text="🎫 VOUCHER MB", callback_data="buy_voucher_mb")],
+        [InlineKeyboardButton(text="🔙 QUAY LẠI", callback_data="menu")]
+    ])
 @dp.message(F.text == "🌐 MUA PROXY")
 async def handle_proxy_menu(msg: Message):
     """Hiển thị menu Proxy"""
@@ -1255,10 +1301,32 @@ def admin_menu():
             [KeyboardButton(text="💰 CỘNG TIỀN"), KeyboardButton(text="💸 TRỪ TIỀN")],
             [KeyboardButton(text="👥 DANH SÁCH USER"), KeyboardButton(text="📦 KHO ACC")],
             [KeyboardButton(text="💰 DOANH THU"), KeyboardButton(text="⚙️ CÀI GIÁ")],
-            [KeyboardButton(text="🔙 QUAY LẠI MENU CHÍNH")],
+            [KeyboardButton(text="📱 THÊM DATA"), KeyboardButton(text="🔙 QUAY LẠI MENU CHÍNH")],  # <-- THÊM DÒNG NÀY
         ],
         resize_keyboard=True,
         input_field_placeholder="Chọn chức năng admin..."
+    )
+@dp.message(F.text == "📱 THÊM DATA")
+async def handle_admin_add_data_button(msg: Message, state: FSMContext):
+    """Xử lý khi admin bấm nút THÊM DATA"""
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    
+    # Hiển thị menu chọn site để thêm data
+    buttons = []
+    for site in DATA_SITES:
+        buttons.append([InlineKeyboardButton(
+            text=f"{DATA_SITE_EMOJI.get(site, '📱')} {site}",
+            callback_data=f"admin_add_data_{site}"
+        )])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="admin_dashboard")])
+    
+    await msg.answer(
+        "📱 <b>THÊM DATA (SỐ ĐIỆN THOẠI)</b>\n\n"
+        "👇 <b>Chọn site cần thêm số:</b>\n\n"
+        f"💰 <b>Giá bán:</b> {DATA_SITE_PRICE:,}đ/số",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 # ==================== XỬ LÝ MENU CHÍNH (REPLY KEYBOARD) ====================
 
@@ -1301,14 +1369,10 @@ async def handle_otp(msg: Message):
 💰 <b>Giá mỗi số:</b> 2,750đ
 ⏱️ <b>Thời gian chờ:</b> Tối đa 6 phút
 
-━━━━━━━━━━━━━━━━━━━━━━━━
 📋 <b>HƯỚNG DẪN:</b>
 • Chọn site cần nhận OTP bên dưới
 • Sau khi thuê sẽ nhận được số điện thoại
-• Hệ thống tự động kiểm tra OTP mỗi 2 giây
-• Mã OTP sẽ được gửi ngay khi có (kèm audio nếu là OTP call)
 • <b>Tự động hoàn tiền 100% sau 6 phút</b> nếu không nhận được OTP
-━━━━━━━━━━━━━━━━━━━━━━━━
 
 📱 <b>Đang thuê:</b> {active_count} số
 
@@ -1505,7 +1569,7 @@ async def handle_support(msg: Message):
 📌 <b>Các vấn đề cần hỗ trợ:</b>
 • 🎮 Lỗi đăng nhập account
 • 💳 Nạp tiền chưa nhận được
-• 🔐 Quên mật khẩu rút tiền
+• 🔐 Hỗ trợ bảo hành số: @imquanglam
 • 📝 Khiếu nại, thắc mắc khác
 
 ━━━━━━━━━━━━━━━━━━━━
@@ -1525,7 +1589,18 @@ async def handle_back_to_main(msg: Message):
     balance = user[3] if user and isinstance(user[3], int) else 0
     await msg.answer("🏠 <b>MENU CHÍNH</b>\n\n👇 Chọn chức năng:", reply_markup=main_menu(balance))
 # ==================== XỬ LÝ MENU ADMIN (REPLY KEYBOARD) ====================
-
+@dp.message(F.text == "🛒 MUA HÀNG")
+async def handle_buy_goods(msg: Message):
+    """Hiển thị menu con khi bấm nút MUA HÀNG"""
+    user = get_user(msg.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    
+    await msg.answer(
+        f"🛍️ <b>MENU MUA HÀNG</b>\n\n"
+        f"💰 <b>Số dư hiện tại:</b> {balance:,}đ\n\n"
+        f"👇 <b>Chọn loại sản phẩm bạn muốn mua:</b>",
+        reply_markup=buy_goods_menu()
+    )
 @dp.message(F.text == "📊 DASHBOARD")
 async def handle_admin_dashboard(msg: Message):
     if msg.from_user.id not in ADMIN_IDS:
@@ -1661,6 +1736,425 @@ async def ref_info_callback(call: CallbackQuery):
     await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
     ]))
+
+# ==================== XỬ LÝ NÚT MUA HÀNG TRÊN MENU CHÍNH ====================
+@dp.message(F.text == "🛍️ MUA HÀNG")
+async def handle_buy_goods_button(msg: Message):
+    """Hiển thị menu con khi bấm nút MUA HÀNG trên menu chính"""
+    user = get_user(msg.from_user.id)
+    balance = user[3] if user and isinstance(user[3], int) else 0
+    
+    # Tạo inline menu cho các lựa chọn
+    await msg.answer(
+        f"🛍️ <b>MENU MUA HÀNG</b>\n\n"
+        f"💰 <b>Số dư hiện tại:</b> <code>{balance:,}đ</code>\n\n"
+        f"👇 <b>Chọn loại sản phẩm:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎮 MUA ACC", callback_data="buy_acc")],
+            [InlineKeyboardButton(text="📱 MUA DATA", callback_data="buy_data")],
+            [InlineKeyboardButton(text="🔐 THUÊ OTP", callback_data="rent_otp")],
+            [InlineKeyboardButton(text="🌐 MUA PROXY", callback_data="buy_proxy")],
+            [InlineKeyboardButton(text="🎫 VOUCHER MB", callback_data="buy_voucher_mb")],
+        ])
+    )
+
+# ==================== USER MUA DATA ====================
+@dp.callback_query(F.data == "buy_data")
+async def handle_buy_data(call: CallbackQuery, state: FSMContext):
+    """Hiển thị menu chọn site DATA (giống giao diện bán acc)"""
+    await call.message.delete()
+    
+    # Đếm số lượng data còn
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    inv = {}
+    for site in DATA_SITES:
+        c.execute("SELECT COUNT(*) FROM data_phones WHERE site = %s AND is_sold = 0", (site,))
+        inv[site] = c.fetchone()[0]
+    conn.close()
+    
+    text = "📱 <b>MENU DATA - SỐ ĐIỆN THOẠI</b>\n\n"
+    for site in DATA_SITES:
+        price = DATA_SITE_PRICE
+        text += f"{DATA_SITE_EMOJI[site]} {site}: {price:,}đ/số | ✅ {inv.get(site, 0)} còn\n"
+    
+    text += "\n⚠️ <b>LƯU Ý: CHỈ BẢO HÀNH SỐ TRONG TRƯỜNG HỢP SAU: </b>\n"
+    text += "🚫 Rất tiếc, tài khoản Quý Khách không phù hợp để nhận khuyến mãi này hoặc số điện thoại đã được nhận.\n\n"
+    text += "🔗 <b>LINK ĐĂNG KÝ:</b>\n"
+    text += "• http://dxshort.com/pbJzPY\n"
+    text += "• http://TFshZ.BIDVoa.com\n"
+    text += "• http://KlGLPm.Acbidv.com"
+    
+    buttons = []
+    for site in DATA_SITES:
+        count = inv.get(site, 0)
+        status = "✅" if count > 0 else "❌"
+        buttons.append([InlineKeyboardButton(
+            text=f"{DATA_SITE_EMOJI[site]} {site} {status} ({count})",
+            callback_data=f"buy_data_{site}"
+        )])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")])
+    
+    await call.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data.startswith("buy_data_"))
+async def data_ask_quantity(call: CallbackQuery, state: FSMContext):
+    """Hỏi số lượng cần mua"""
+    site = call.data.split("_")[2]
+    await state.update_data(site=site)
+    
+    await call.message.delete()
+    await call.message.answer(
+        f"📱 <b>MUA DATA {DATA_SITE_EMOJI[site]} {site}</b>\n\n"
+        f"💰 <b>Giá:</b> {DATA_SITE_PRICE:,}đ/số\n\n"
+        f"📝 <b>Nhập số lượng cần mua:</b>\n"
+        f"(Tối đa 50 số/lần)\n\n"
+        f"Gửi /cancel để hủy"
+    )
+    await state.set_state(DataState.waiting_for_quantity)
+
+
+@dp.message(DataState.waiting_for_quantity)
+async def data_process_buy(msg: Message, state: FSMContext):
+    """Xử lý mua DATA với số lượng nhập vào"""
+    try:
+        quantity = int(msg.text.strip())
+        
+        if quantity < 1:
+            await msg.answer("❌ Số lượng phải lớn hơn 0!")
+            return
+        
+        if quantity > 50:
+            await msg.answer("❌ Mỗi lần chỉ được mua tối đa 50 số!")
+            return
+        
+        data = await state.get_data()
+        site = data.get('site')
+        
+        price = DATA_SITE_PRICE * quantity
+        user = get_user(msg.from_user.id)
+        balance = user[3] if isinstance(user[3], int) else 0
+        
+        if balance < price:
+            await msg.answer(f"❌ Số dư không đủ! Cần {price:,}đ. Bạn có {balance:,}đ")
+            await state.clear()
+            return
+        
+        # Lấy danh sách số chưa bán
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, phone_number FROM data_phones WHERE site = %s AND is_sold = 0 LIMIT %s", (site, quantity))
+        phones = c.fetchall()
+        
+        if len(phones) < quantity:
+            await msg.answer(f"❌ Không đủ số! Chỉ còn {len(phones)} số cho {site}")
+            conn.close()
+            await state.clear()
+            return
+        
+        # Trừ tiền
+        update_balance(msg.from_user.id, -price, f"Mua {quantity} data {site}")
+        
+        # Đánh dấu đã bán và lưu lịch sử
+        phone_list = []
+        for phone_id, phone_number in phones:
+            c.execute("UPDATE data_phones SET is_sold = 1, sold_to = %s, sold_at = %s WHERE id = %s",
+                      (msg.from_user.id, datetime.now(VIETNAM_TZ).isoformat(), phone_id))
+            c.execute("INSERT INTO data_phone_purchases (user_id, phone_id, site, phone_number, quantity, amount, purchased_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                      (msg.from_user.id, phone_id, site, phone_number, 1, DATA_SITE_PRICE, datetime.now(VIETNAM_TZ).isoformat()))
+            phone_list.append(phone_number)
+        
+        conn.commit()
+        conn.close()
+        
+        new_balance = balance - price
+        current_time = datetime.now(VIETNAM_TZ).strftime('%d/%m/%Y %H:%M:%S')
+        
+        # Tạo file txt
+        import io
+        filename = f"LAM05_{site}_{msg.from_user.id}_{int(datetime.now().timestamp())}.txt"
+        
+        separator = "=" * 40
+        file_content = f"{separator}\n"
+        file_content += f"📱 DATA {site}\n"
+        file_content += f"👤 User: {msg.from_user.id}\n"
+        file_content += f"📅 Ngày mua: {current_time}\n"
+        file_content += f"📦 Số lượng: {quantity} số\n"
+        file_content += f"💰 Thành tiền: {price:,}đ\n"
+        file_content += f"💵 Số dư: {new_balance:,}đ\n"
+        file_content += f"{separator}\n\n"
+        
+        for i, phone in enumerate(phone_list, 1):
+            file_content += f"{i:2d}. {phone}\n"
+        
+        file_content += f"\n{separator}\n"
+        file_content += f"© LAM05 BOT\n"
+        
+        file_bytes = io.BytesIO(file_content.encode('utf-8'))
+        
+        # Gửi file cho user kèm cảnh báo lưu file
+        await msg.answer_document(
+            document=BufferedInputFile(file_bytes.getvalue(), filename=filename),
+            caption=f"✅ <b>MUA DATA THÀNH CÔNG!</b>\n\n"
+                    f"📱 <b>Site:</b> {DATA_SITE_EMOJI[site]} {site}\n"
+                    f"📦 <b>Số lượng:</b> {quantity} số\n"
+                    f"💰 <b>Tổng tiền:</b> {price:,}đ\n"
+                    f"💵 <b>Số dư còn:</b> {new_balance:,}đ\n"
+                    f"📅 <b>{current_time}</b>\n\n"
+                    f"⚠️ <b>⚠️ HÃY LƯU FILE NÀY LẠI ⚠️</b>\n"
+                    f"📁 <b>Tên file:</b> <code>{filename}</code>\n\n"
+                    f"🔴 <b>BẠN SẼ MẤT SỐ NẾU KHÔNG LƯU FILE!</b>\n"
+                    f"💡 Vui lòng tải file và lưu vào máy ngay!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            ])
+        )
+        
+        # Gửi thông báo admin
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"📱 <b>CÓ USER MUA DATA</b>\n\n"
+                    f"👤 User: {msg.from_user.id} (@{msg.from_user.username or 'no username'})\n"
+                    f"📝 Tên: {msg.from_user.full_name}\n"
+                    f"🎮 Site: {DATA_SITE_EMOJI[site]} {site}\n"
+                    f"📦 Số lượng: {quantity} số\n"
+                    f"💰 Tổng tiền: {price:,}đ\n"
+                    f"💵 Lợi nhuận: {price:,}đ\n"
+                    f"📅 {datetime.now(VIETNAM_TZ).strftime('%H:%M:%S %d/%m/%Y')}"
+                )
+            except:
+                pass
+        
+        await state.clear()
+        
+    except ValueError:
+        await msg.answer("❌ Vui lòng nhập số lượng hợp lệ!")
+    except Exception as e:
+        await msg.answer(f"❌ Lỗi: {e}")
+# ==================== ADMIN THÊM DATA ====================
+@dp.message(Command("adddata"))
+async def admin_add_data_menu(msg: Message, state: FSMContext):
+    """Admin thêm data - hiển thị menu chọn site"""
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("⛔ Không có quyền!")
+        return
+    
+    buttons = []
+    for site in DATA_SITES:
+        buttons.append([InlineKeyboardButton(
+            text=f"{DATA_SITE_EMOJI[site]} {site}",
+            callback_data=f"admin_add_data_{site}"
+        )])
+    buttons.append([InlineKeyboardButton(text="🔙 Quay lại", callback_data="admin_dashboard")])
+    
+    await msg.answer(
+        "📱 <b>THÊM DATA (SỐ ĐIỆN THOẠI)</b>\n\n"
+        "👇 <b>Chọn site cần thêm số:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_add_data_"))
+async def admin_add_data_ask_phones(call: CallbackQuery, state: FSMContext):
+    """Yêu cầu admin nhập danh sách số điện thoại"""
+    site = call.data.replace("admin_add_data_", "")
+    await state.update_data(site=site)
+    
+    await call.message.delete()
+    await call.message.answer(
+        f"📱 <b>THÊM DATA {DATA_SITE_EMOJI[site]} {site}</b>\n\n"
+        f"📝 <b>Nhập danh sách số điện thoại:</b>\n"
+        f"Mỗi số 1 dòng\n\n"
+        f"<b>Ví dụ:</b>\n"
+        f"<code>0987654321</code>\n"
+        f"<code>0978123456</code>\n"
+        f"<code>0912345678</code>\n\n"
+        f"Gửi /cancel để hủy"
+    )
+    await state.set_state(DataState.waiting_for_phones)
+
+@dp.callback_query(F.data == "history_data")
+async def history_data_handler(call: CallbackQuery):
+    """Xem lịch sử mua DATA - tạo file txt riêng cho từng site"""
+    import io
+    import os
+    
+    # Tạo thư mục lưu file nếu chưa có
+    os.makedirs("lichsu_data", exist_ok=True)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    # Lấy tất cả giao dịch của user
+    c.execute("""
+        SELECT site, phone_number, purchased_at 
+        FROM data_phone_purchases 
+        WHERE user_id = %s 
+        ORDER BY site, id DESC
+    """, (call.from_user.id,))
+    purchases = c.fetchall()
+    conn.close()
+    
+    if not purchases:
+        await call.message.edit_text(
+            "📭 Bạn chưa mua data nào!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📱 MUA DATA NGAY", callback_data="buy_data")],
+                [InlineKeyboardButton(text="🔙 Quay lại", callback_data="buy_acc")]
+            ])
+        )
+        return
+    
+    # Nhóm theo site
+    data_by_site = {}
+    for site, phone, purchased_at in purchases:
+        if site not in data_by_site:
+            data_by_site[site] = []
+        data_by_site[site].append((phone, purchased_at))
+    
+    # Tạo file zip chứa nhiều file txt
+    import zipfile
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for site, phones in data_by_site.items():
+            # Tạo nội dung file txt cho từng site
+            file_content = ""
+            for i, (phone, purchased_at) in enumerate(phones[:20], 1):
+                try:
+                    dt = datetime.fromisoformat(purchased_at.replace('T', ' '))
+                    date_str = dt.strftime('%d/%m/%Y %H:%M:%S')
+                except:
+                    date_str = str(purchased_at)[:19] if purchased_at else "Không rõ"
+                
+                file_content += f"{i:2d}. {phone}  |  {date_str}\n"
+            
+            # Thêm file vào zip
+            filename = f"LAM05_{site}.txt"
+            zip_file.writestr(filename, file_content)
+    
+    zip_buffer.seek(0)
+    
+    # Đếm tổng số
+    total_sites = len(data_by_site)
+    total_phones = len(purchases)
+    
+    await call.message.delete()
+    await call.message.answer_document(
+        document=BufferedInputFile(zip_buffer.getvalue(), filename=f"LAM05_LichSuData_{call.from_user.id}.zip"),
+        caption=f"📱 <b>LỊCH SỬ MUA DATA</b>\n\n"
+                f"📦 {total_sites} site | {total_phones} số\n"
+                f"📅 {datetime.now(VIETNAM_TZ).strftime('%d/%m/%Y %H:%M:%S')}\n\n"
+                f"📁 File zip chứa file txt của từng site",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 MUA DATA TIẾP", callback_data="buy_data")],
+            [InlineKeyboardButton(text="🏠 MENU", callback_data="menu")]
+        ])
+    )
+@dp.message(DataState.waiting_for_phones)
+async def admin_add_data_save(msg: Message, state: FSMContext):
+    """Lưu danh sách số điện thoại vào database"""
+    if msg.from_user.id not in ADMIN_IDS:
+        return
+    
+    if msg.text == "/cancel":
+        await state.clear()
+        await msg.answer("❌ Đã hủy!")
+        return
+    
+    data = await state.get_data()
+    site = data.get('site')
+    
+    # Lấy danh sách số
+    phone_numbers = msg.text.strip().split('\n')
+    valid_phones = []
+    invalid_phones = []
+    
+    for phone in phone_numbers:
+        phone = phone.strip()
+        if phone and len(phone) >= 9 and phone.isdigit():
+            valid_phones.append(phone)
+        elif phone:
+            invalid_phones.append(phone)
+    
+    if not valid_phones:
+        await msg.answer("❌ Không có số điện thoại hợp lệ nào!\nSố phải là dãy số từ 9-15 chữ số.")
+        return
+    
+    # Thêm vào database
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    added = 0
+    for phone in valid_phones:
+        # Không kiểm tra trùng, thêm luôn
+        c.execute("INSERT INTO data_phones (site, phone_number, created_at) VALUES (%s, %s, %s)",
+                  (site, phone, datetime.now(VIETNAM_TZ).isoformat()))
+        added += 1
+    
+    conn.commit()
+    
+    # Đếm tổng số hiện tại
+    c.execute("SELECT COUNT(*) FROM data_phones WHERE site = %s AND is_sold = 0", (site,))
+    total = c.fetchone()[0]
+    conn.close()
+    
+    await msg.answer(
+        f"✅ <b>ĐÃ THÊM DATA {DATA_SITE_EMOJI[site]} {site}</b>\n\n"
+        f"📱 Thành công: {added} số\n"
+        f"❌ Không hợp lệ: {len(invalid_phones)} số\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 Tồn kho {site}: {total} số"
+    )
+    
+    if invalid_phones:
+        await msg.answer(f"❌ Các số không hợp lệ:\n" + "\n".join(invalid_phones[:10]))
+    
+    await state.clear()
+    await msg.answer("👑 ADMIN PANEL", reply_markup=admin_menu())
+# ==================== CHUYỂN HƯỚNG TỪ MENU MUA HÀNG ====================
+@dp.callback_query(F.data == "buy_acc")
+async def redirect_buy_acc(call: CallbackQuery):
+    """Chuyển hướng đến MUA ACC"""
+    await call.message.delete()
+    await handle_buy(call.message)
+
+@dp.callback_query(F.data == "rent_otp")
+async def redirect_rent_otp(call: CallbackQuery):
+    """Chuyển hướng đến THUÊ OTP"""
+    await call.message.delete()
+    await handle_otp(call.message)
+
+@dp.callback_query(F.data == "buy_proxy")
+async def redirect_buy_proxy(call: CallbackQuery):
+    """Chuyển hướng đến MENU PROXY (hiển thị menu đầy đủ)"""
+    await call.message.delete()
+    
+    # ✅ HIỂN THỊ MENU PROXY ĐẦY ĐỦ (giống như khi bấm nút 🌐 MUA PROXY)
+    proxies = get_user_proxies(call.from_user.id)
+    proxy_count = len(proxies)
+    
+    await call.message.answer(
+        "🔐 <b>MENU PROXY</b>\n\n"
+        f"💰 <b>Giá:</b> {PROXY_PRICE_PER_DAY:,}đ/ngày\n"
+        f"📦 <b>Proxy đang có:</b> {proxy_count}\n\n"
+        "📌 <b>Chọn chức năng:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 MUA PROXY MỚI", callback_data="proxy_buy")],
+            [InlineKeyboardButton(text="📋 DANH SÁCH PROXY", callback_data="proxy_list")],
+            [InlineKeyboardButton(text="🔄 XOAY IP", callback_data="proxy_rotate")],
+            [InlineKeyboardButton(text="🔙 Quay lại", callback_data="menu")]
+        ])
+    )
+
+@dp.callback_query(F.data == "buy_voucher_mb")
+async def redirect_buy_voucher(call: CallbackQuery, state: FSMContext):
+    """Chuyển hướng đến VOUCHER MB"""
+    await call.message.delete()
+    await voucher_mb_menu(call.message, state)
 # ==================== USER ====================
 @dp.message(Command("start"))
 async def start(msg: Message):
@@ -1700,12 +2194,8 @@ async def start(msg: Message):
 🎉 <b>CHÀO MỪNG {msg.from_user.first_name}!</b>
 
 💰 <b>Số dư:</b> {balance:,}đ
-🎮 <b>Giá mỗi acc:</b> 20,000đ
-📦 <b>Các site:</b> {', '.join(SITES)}
 
-💡 <b>Hướng dẫn:</b>
-• Chọn MUA ACC để mua tài khoản
-• Lưu ý: Mọi người khi mua acc quay video từ lúc mua tới lúc đăng nhập để được bảo hành nhé!
+💡 <b>NHÓM: https://t.me/toollo05:</b>
 
 👇 <b>Chọn chức năng:</b>
 """
@@ -2819,6 +3309,30 @@ async def check_hupsms_loop(user_id: int, session_id: str, order_id: str, servic
             print(f"Lỗi check HupSMS: {e}")
         
         await asyncio.sleep(2)
+def get_user_data_history(user_id: int, limit: int = 20) -> List[Dict]:
+    """Lấy lịch sử mua DATA của user"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT site, phone_number, quantity, amount, purchased_at 
+        FROM data_phone_purchases 
+        WHERE user_id = %s 
+        ORDER BY id DESC 
+        LIMIT %s
+    """, (user_id, limit))
+    purchases = c.fetchall()
+    conn.close()
+    
+    history = []
+    for p in purchases:
+        history.append({
+            'site': p[0],
+            'phone_number': p[1],
+            'quantity': p[2],
+            'amount': p[3],
+            'purchased_at': p[4]
+        })
+    return history
 def format_phone_number(phone: str) -> str:
     """Xử lý số điện thoại - bỏ số 0 ở đầu nếu có"""
     if not phone:
@@ -3741,6 +4255,39 @@ async def admin_dash(call: CallbackQuery):
     proxy_total_profit = proxy_total_revenue - (proxy_total_days * 4000)
     proxy_today_profit = proxy_today_revenue - (proxy_today_days * 4000)
     
+    # ==================== THỐNG KÊ DATA ====================
+    try:
+        c.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM data_phone_purchases")
+        result = c.fetchone()
+        data_total_count, data_total_revenue = result if result else (0, 0)
+    except:
+        data_total_count, data_total_revenue = 0, 0
+    
+    # Thống kê DATA hôm nay (theo giờ Việt Nam)
+    today_start_vn = datetime.now(VIETNAM_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end_vn = today_start_vn + timedelta(days=1)
+    
+    try:
+        c.execute("""
+            SELECT COUNT(*), COALESCE(SUM(amount), 0) 
+            FROM data_phone_purchases 
+            WHERE purchased_at >= %s AND purchased_at < %s
+        """, (today_start_vn.isoformat(), today_end_vn.isoformat()))
+        result = c.fetchone()
+        data_today_count, data_today_revenue = result if result else (0, 0)
+    except:
+        data_today_count, data_today_revenue = 0, 0
+    
+    # Thống kê DATA theo từng site
+    data_by_site = {}
+    try:
+        for site in DATA_SITES:
+            c.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM data_phone_purchases WHERE site = %s", (site,))
+            result = c.fetchone()
+            data_by_site[site] = {'count': result[0] if result else 0, 'revenue': result[1] if result else 0}
+    except:
+        pass
+    
     conn.close()
     
     text = f"""
@@ -3756,6 +4303,21 @@ async def admin_dash(call: CallbackQuery):
 • Tổng doanh thu acc: {total_revenue:,}đ
 • Tổng acc đã bán: {total_sold}
 
+━━━━━━━━━━━━━━━━━━━━━━━
+📱 <b>Thống kê DATA (số điện thoại):</b>
+• Hôm nay: {data_today_count} số | {data_today_revenue:,}đ
+• Tổng đã bán: {data_total_count} số | {data_total_revenue:,}đ
+
+"""
+    
+    # Thêm chi tiết theo site DATA
+    if data_total_count > 0:
+        text += f"<b>📱 Chi tiết theo site DATA:</b>\n"
+        for site in DATA_SITES:
+            text += f"{DATA_SITE_EMOJI.get(site, '📱')} {site}: {data_by_site.get(site, {}).get('count', 0)} số | {data_by_site.get(site, {}).get('revenue', 0):,}đ\n"
+        text += f"\n"
+    
+    text += f"""
 ━━━━━━━━━━━━━━━━━━━━━━━
 🌐 <b>Thống kê PROXY:</b>
 • Hôm nay: {proxy_today_count} proxy | {proxy_today_revenue:,}đ | 📈 LN: {proxy_today_profit:,}đ
@@ -4524,7 +5086,53 @@ async def process_money(msg: Message, state: FSMContext):
 # ==================== CHẠY WEBHOOK ====================
 def run_webhook():
     uvicorn.run(sepay_app, host="0.0.0.0", port=8000)
-
+def ensure_data_phones_table():
+    """Đảm bảo bảng data_phones tồn tại"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    try:
+        # Kiểm tra bảng có tồn tại không
+        c.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'data_phones'
+            )
+        """)
+        exists = c.fetchone()[0]
+        
+        if not exists:
+            print("⚠️ Bảng data_phones chưa tồn tại, đang tạo...")
+            c.execute('''CREATE TABLE IF NOT EXISTS data_phones (
+                id SERIAL PRIMARY KEY,
+                site TEXT,
+                phone_number TEXT,
+                price INTEGER DEFAULT 10000,
+                is_sold INTEGER DEFAULT 0,
+                sold_to BIGINT,
+                sold_at TEXT,
+                created_at TEXT
+            )''')
+            
+            c.execute('''CREATE TABLE IF NOT EXISTS data_phone_purchases (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                phone_id INTEGER,
+                site TEXT,
+                phone_number TEXT,
+                quantity INTEGER,
+                amount INTEGER,
+                purchased_at TEXT
+            )''')
+            conn.commit()
+            print("✅ Đã tạo bảng data_phones và data_phone_purchases")
+        else:
+            print("✅ Bảng data_phones đã tồn tại")
+            
+    except Exception as e:
+        print(f"❌ Lỗi kiểm tra bảng: {e}")
+    finally:
+        conn.close()
 # Sửa lại hàm main
 async def main():
     fix_ref_code()
@@ -4539,6 +5147,6 @@ async def main():
     
     logger.info("✅ Bot sẵn sàng!")
     await dp.start_polling(bot)
-
 if __name__ == "__main__":
+    ensure_data_phones_table()
     asyncio.run(main())
