@@ -118,8 +118,8 @@ PROXY_LOCATIONS = ["HCM", "HNI", "BDG", "RANDOM"]
 ROTATE_INTERVALS = [0]
 # ==================== CẤU HÌNH ====================
 BOT_TOKEN = "8246231057:AAHjwHpgQxt6AiU-67h12Fpm6F500k-wYUI"
-ADMIN_IDS = [5180190297, 7053543892]
-ADMIN_USERNAMES = ["makkllai", "imquanglam"]
+ADMIN_IDS = [5180190297]
+ADMIN_USERNAMES = ["makkllai",]
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # Thêm dòng này
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:Manh123@103.152.164.136:5432/telegram_bot")
@@ -1569,7 +1569,6 @@ async def handle_support(msg: Message):
 📌 <b>Các vấn đề cần hỗ trợ:</b>
 • 🎮 Lỗi đăng nhập account
 • 💳 Nạp tiền chưa nhận được
-• 🔐 Hỗ trợ bảo hành số: @imquanglam
 • 📝 Khiếu nại, thắc mắc khác
 
 ━━━━━━━━━━━━━━━━━━━━
